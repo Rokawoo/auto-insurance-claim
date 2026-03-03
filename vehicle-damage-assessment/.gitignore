@@ -1,0 +1,46 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# virtual environments
+venv/
+.venv/
+env/
+
+# models (large files — track with git-lfs or download separately)
+models/pretrained/*.pt
+models/finetuned/**
+
+# data (too large for git)
+data/raw/**
+data/processed/**
+data/augmented/**
+!data/raw/.gitkeep
+!data/raw/before/.gitkeep
+!data/raw/after/.gitkeep
+
+# outputs
+outputs/**
+!outputs/.gitkeep
+
+# ide
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# os
+.DS_Store
+Thumbs.db
+
+# jupyter
+.ipynb_checkpoints/
+
+# experiment tracking
+wandb/
+mlruns/

@@ -1,0 +1,38 @@
+# training config for fine-tuning YOLOv8 damage segmentation
+
+training:
+  base_model: "yolov8s-seg.pt"   # start from pretrained seg model
+  data_yaml: "data/damage_dataset.yaml"
+  epochs: 100
+  batch_size: 16
+  image_size: 640
+  patience: 15                    # early stopping
+  optimizer: "AdamW"
+  lr0: 0.001
+  lrf: 0.01                      # final lr = lr0 * lrf
+  weight_decay: 0.0005
+  augmentation:
+    hsv_h: 0.015
+    hsv_s: 0.7
+    hsv_v: 0.4
+    degrees: 10.0
+    translate: 0.1
+    scale: 0.5
+    flipud: 0.0
+    fliplr: 0.5
+    mosaic: 1.0
+    mixup: 0.1
+  save_dir: "models/finetuned"
+  project_name: "damage_seg"
+
+evaluation:
+  model_path: "models/finetuned/damage_seg.pt"
+  data_yaml: "data/damage_dataset.yaml"
+  split: "test"
+  iou_threshold: 0.5
+  conf_threshold: 0.25
+  metrics:
+    - "mAP50"
+    - "mAP50-95"
+    - "precision"
+    - "recall"

@@ -1,0 +1,52 @@
+# default pipeline configuration
+# override per-run via CLI or by passing a different yaml
+
+preprocessing:
+  target_size: [640, 640]         # resize both images to this (w, h)
+  grayscale: true                 # convert to grayscale for alignment/diff
+  blur_kernel: 5                  # gaussian blur kernel size (odd int)
+  blur_sigma: 0                   # 0 = auto-compute from kernel
+  clahe:                          # contrast-limited adaptive hist eq
+    enabled: true
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+
+alignment:
+  feature_method: "orb"           # "orb" | "sift" | "akaze"
+  max_features: 5000
+  match_method: "bf"              # "bf" (brute force) | "flann"
+  ratio_threshold: 0.75           # lowe's ratio test
+  ransac_reproj_threshold: 5.0
+  min_match_count: 10
+
+detection:
+  model_name: "yolov8s.pt"       # pretrained yolo weights
+  vehicle_classes: [2, 5, 7]     # COCO: car=2, bus=5, truck=7
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+  mask_dilation_kernel: 15        # dilate vehicle mask to include edges
+
+comparison:
+  diff_method: "absolute"         # "absolute" | "structural_similarity"
+  threshold: 30                   # pixel diff threshold (0-255)
+  morph_kernel: 5                 # morphological cleanup kernel
+  morph_iterations: 2
+  min_contour_area: 500           # ignore tiny diff blobs (px^2)
+  max_contour_area: 100000        # ignore huge blobs (probably misalign)
+
+segmentation:
+  enabled: false                  # set true once fine-tuned model exists
+  model_path: "models/finetuned/damage_seg.pt"
+  damage_classes:
+    0: "scratch"
+    1: "dent"
+    2: "crack"
+    3: "shatter"
+    4: "deformation"
+  confidence_threshold: 0.4
+
+output:
+  save_visualizations: true
+  save_report: true
+  output_dir: "outputs"
+  visualization_format: "png"     # "png" | "jpg"

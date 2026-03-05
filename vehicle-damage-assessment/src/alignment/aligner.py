@@ -6,32 +6,26 @@ Take two photos of the same vehicle from (potentially) different camera
 positions and warp one into the other's coordinate frame so they can be
 compared pixel-by-pixel downstream.
 
-LIMITATIONS (being honest)
---------------------------
-A single global homography assumes the scene is roughly planar. Cars are
-3D objects — a fender curves away from a door panel. If the two photos are
-taken from very different angles, no single 2D warp can perfectly align
-the whole car. The alignment will be best in the region where most
-keypoint matches cluster (usually the largest flat-ish panel visible).
+ROBUSTNESS FEATURES
+-------------------
+- Exposure normalization (CLAHE) before feature detection so lighting
+  differences between shots don't kill matching.
+- Multiple detector support (ORB / SIFT / AKAZE) with automatic fallback:
+  if the primary method doesn't get enough matches, tries the next one.
+- Both homography (8-DOF) and affine (4-DOF) transforms — affine is more
+  stable on 3D subjects like cars where perspective correction can distort.
+- Valid-region mask: after warping, black border pixels are masked out so
+  downstream diff stages don't flag them as "damage."
+- Quality metrics (reprojection error, inlier ratio) with a reliability
+  flag the pipeline can use to decide whether to trust pixel differencing
+  or fall back to detection-only assessment.
 
-For mildly different viewpoints (same side of the car, small angle shift)
-this works well. For dramatically different viewpoints, downstream stages
-should rely more on learned detection (YOLO) than pixel differencing.
-
-STRATEGIES
-----------
-This module provides two alignment approaches:
-
-1. **Homography** (default) — single 3x3 perspective transform.
-   Best for: small viewpoint changes, mostly-planar subjects.
-
-2. **Affine** — 6-DOF affine transform (no perspective distortion).
-   Best for: when the camera is far from the car (telephoto-ish),
-   or when homography produces weird warping artifacts.
-
-The caller can also get quality metrics to decide whether the alignment
-is trustworthy enough for pixel differencing, or whether to fall back
-to detection-only assessment.
+LIMITATIONS
+-----------
+A single global transform assumes the scene is roughly planar. Cars are
+3D — a fender curves away from a door. For mild viewpoint shifts (same
+side, small angle change) this works well. For large angle differences,
+downstream should lean on YOLO detection rather than pixel differencing.
 """
 
 from __future__ import annotations
@@ -57,17 +51,25 @@ class AlignmentResult:
     ----------
     warped_after : np.ndarray
         The "after" image warped into the "before" image's frame.
+    valid_mask : np.ndarray
+        Binary mask (uint8, 0/255) of the region that has actual image
+        data after warping. Pixels outside this are black border artifacts
+        and should be ignored by any downstream diff/comparison.
     transform : np.ndarray
         The estimated transform matrix (3x3 for homography, 2x3 for affine).
     warp_method : WarpMethod
-        Which method was used.
+        Which method produced this result.
+    feature_method : str
+        Which detector was actually used (may differ from config if fallback kicked in).
     num_inliers : int
         RANSAC inlier count — higher = more confident alignment.
     inlier_ratio : float
         inliers / total_good_matches — closer to 1.0 = cleaner match set.
     reprojection_error : float
         Mean reprojection error of inliers in pixels.
-        Lower = more accurate alignment. >5px is suspicious.
+        Lower = more accurate. >5px is suspicious.
+    num_matches : int
+        Total good matches after ratio test (before RANSAC).
     keypoints_before : list
         Detected keypoints in the before image.
     keypoints_after : list
@@ -80,11 +82,14 @@ class AlignmentResult:
     """
 
     warped_after: np.ndarray = field(repr=False)
+    valid_mask: np.ndarray = field(repr=False)
     transform: np.ndarray = field(repr=False)
     warp_method: WarpMethod = WarpMethod.HOMOGRAPHY
+    feature_method: str = "orb"
     num_inliers: int = 0
     inlier_ratio: float = 0.0
     reprojection_error: float = float("inf")
+    num_matches: int = 0
     keypoints_before: list = field(default_factory=list, repr=False)
     keypoints_after: list = field(default_factory=list, repr=False)
     matches: list = field(default_factory=list, repr=False)
@@ -99,29 +104,35 @@ class ImageAligner:
     config : dict
         The ``alignment`` section of the pipeline config. Keys:
 
-        - feature_method : str — "orb", "sift", or "akaze"
-        - max_features : int — max keypoints to detect
-        - match_method : str — "bf" or "flann"
-        - ratio_threshold : float — Lowe's ratio test threshold (0-1)
-        - ransac_reproj_threshold : float — RANSAC inlier pixel tolerance
-        - min_match_count : int — minimum matches required
-        - warp_method : str — "homography" or "affine"
-        - max_reprojection_error : float — above this, alignment is flagged unreliable
-        - min_inlier_ratio : float — below this, alignment is flagged unreliable
+        - feature_method : str — "orb", "sift", or "akaze" (default "orb")
+        - max_features : int — max keypoints to detect (default 10000)
+        - match_method : str — "bf" or "flann" (default "bf")
+        - ratio_threshold : float — Lowe's ratio test threshold (default 0.75)
+        - ransac_reproj_threshold : float — RANSAC inlier pixel tolerance (default 5.0)
+        - min_match_count : int — minimum matches required (default 10)
+        - warp_method : str — "homography" or "affine" (default "homography")
+        - max_reprojection_error : float — reliability threshold (default 5.0)
+        - min_inlier_ratio : float — reliability threshold (default 0.25)
+        - fallback : bool — try other detectors if primary fails (default True)
+        - normalize_exposure : bool — apply CLAHE before detection (default True)
     """
 
     FEATURE_DETECTORS = {"orb", "sift", "akaze"}
+    # fallback order: try SIFT (most robust) then AKAZE then ORB
+    FALLBACK_ORDER = ["sift", "akaze", "orb"]
 
     def __init__(self, config: dict) -> None:
         self.feature_method: str = config.get("feature_method", "orb")
-        self.max_features: int = config.get("max_features", 5000)
+        self.max_features: int = config.get("max_features", 10000)
         self.match_method: str = config.get("match_method", "bf")
         self.ratio_threshold: float = config.get("ratio_threshold", 0.75)
         self.ransac_thresh: float = config.get("ransac_reproj_threshold", 5.0)
         self.min_match_count: int = config.get("min_match_count", 10)
         self.warp_method: WarpMethod = WarpMethod(config.get("warp_method", "homography"))
         self.max_reproj_error: float = config.get("max_reprojection_error", 5.0)
-        self.min_inlier_ratio: float = config.get("min_inlier_ratio", 0.3)
+        self.min_inlier_ratio: float = config.get("min_inlier_ratio", 0.25)
+        self.fallback: bool = config.get("fallback", True)
+        self.normalize_exposure: bool = config.get("normalize_exposure", True)
 
         if self.feature_method not in self.FEATURE_DETECTORS:
             raise ValueError(
@@ -136,6 +147,9 @@ class ImageAligner:
     def align(self, before: np.ndarray, after: np.ndarray) -> AlignmentResult:
         """Compute transform and warp *after* to match *before*.
 
+        If ``fallback`` is enabled and the primary detector doesn't produce
+        enough matches, automatically tries other detectors before giving up.
+
         Parameters
         ----------
         before : np.ndarray
@@ -146,29 +160,80 @@ class ImageAligner:
         Returns
         -------
         AlignmentResult
-            Warped image, transform, quality metrics, and reliability flag.
+            Warped image, valid mask, transform, quality metrics.
 
         Raises
         ------
         RuntimeError
-            If feature detection or matching fails completely.
+            If all methods fail to produce a viable alignment.
         """
-        # step 1: detect keypoints + descriptors
-        detector = self._create_detector()
-        kp_before, desc_before = detector.detectAndCompute(before, None)
-        kp_after, desc_after = detector.detectAndCompute(after, None)
+        # normalize exposure before feature detection
+        before_norm = self._normalize(before)
+        after_norm = self._normalize(after)
+
+        # build detector order: primary first, then fallbacks
+        methods_to_try = [self.feature_method]
+        if self.fallback:
+            for m in self.FALLBACK_ORDER:
+                if m not in methods_to_try:
+                    methods_to_try.append(m)
+
+        last_error = None
+        for method in methods_to_try:
+            try:
+                result = self._try_align(before_norm, after_norm, before, after, method)
+                return result
+            except RuntimeError as e:
+                last_error = e
+                if method == self.feature_method:
+                    # primary failed — worth reporting
+                    pass
+                continue
+
+        # all methods exhausted
+        raise RuntimeError(
+            f"Alignment failed with all methods {methods_to_try}. "
+            f"Last error: {last_error}"
+        )
+
+    # ------------------------------------------------------------------
+    # internal: core alignment attempt
+    # ------------------------------------------------------------------
+
+    def _try_align(
+        self,
+        before_norm: np.ndarray,
+        after_norm: np.ndarray,
+        before_orig: np.ndarray,
+        after_orig: np.ndarray,
+        feature_method: str,
+    ) -> AlignmentResult:
+        """Single alignment attempt with a specific detector.
+
+        Uses the normalized images for feature detection/matching, but
+        warps the original images so output quality isn't degraded.
+        """
+        # detect + describe
+        detector = self._create_detector(feature_method)
+        kp_before, desc_before = detector.detectAndCompute(before_norm, None)
+        kp_after, desc_after = detector.detectAndCompute(after_norm, None)
 
         if desc_before is None or desc_after is None:
             raise RuntimeError(
-                "Could not detect any features in one or both images. "
-                "Images may be blank or too uniform."
+                f"[{feature_method}] no features detected in one or both images."
             )
 
-        # step 2: match + ratio test
+        if len(kp_before) < self.min_match_count or len(kp_after) < self.min_match_count:
+            raise RuntimeError(
+                f"[{feature_method}] too few keypoints: "
+                f"before={len(kp_before)}, after={len(kp_after)}"
+            )
+
+        # match + ratio test
         matcher = self._create_matcher(desc_before.dtype)
         good_matches = self._match_and_filter(matcher, desc_before, desc_after)
 
-        # step 3: estimate transform
+        # estimate transform
         transform, inlier_mask = self._estimate_transform(
             kp_before, kp_after, good_matches
         )
@@ -176,16 +241,23 @@ class ImageAligner:
         num_inliers = int(inlier_mask.ravel().sum()) if inlier_mask is not None else 0
         inlier_ratio = num_inliers / max(len(good_matches), 1)
 
-        # step 4: compute reprojection error on inliers
+        # reprojection error
         reproj_error = self._reprojection_error(
             kp_before, kp_after, good_matches, transform, inlier_mask
         )
 
-        # step 5: warp
-        h, w = before.shape[:2]
-        warped = self._warp_image(after, transform, (h, w))
+        # warp the ORIGINAL after image (not the normalized one)
+        h, w = before_orig.shape[:2]
+        warped = self._warp_image(after_orig, transform, (h, w))
 
-        # step 6: judge reliability
+        # build valid-region mask: warp a white image to see where data lands
+        white = np.full(after_orig.shape[:2], 255, dtype=np.uint8)
+        valid_mask = self._warp_image(white, transform, (h, w))
+        # erode slightly to remove interpolation fuzz at edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        valid_mask = cv2.erode(valid_mask, kernel, iterations=1)
+
+        # reliability
         is_reliable = (
             num_inliers >= self.min_match_count
             and inlier_ratio >= self.min_inlier_ratio
@@ -194,11 +266,14 @@ class ImageAligner:
 
         return AlignmentResult(
             warped_after=warped,
+            valid_mask=valid_mask,
             transform=transform,
             warp_method=self.warp_method,
+            feature_method=feature_method,
             num_inliers=num_inliers,
             inlier_ratio=inlier_ratio,
             reprojection_error=reproj_error,
+            num_matches=len(good_matches),
             keypoints_before=list(kp_before),
             keypoints_after=list(kp_after),
             matches=good_matches,
@@ -206,19 +281,56 @@ class ImageAligner:
         )
 
     # ------------------------------------------------------------------
+    # internal: preprocessing
+    # ------------------------------------------------------------------
+
+    def _normalize(self, image: np.ndarray) -> np.ndarray:
+        """Normalize an image for more robust feature detection.
+
+        Applies CLAHE (contrast-limited adaptive histogram equalization)
+        to handle exposure/lighting differences between the before and
+        after shots. Works on grayscale; if BGR, converts to grayscale
+        first since feature detection only uses intensity anyway.
+
+        Returns grayscale uint8 image.
+        """
+        if image.ndim == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        if not self.normalize_exposure:
+            return gray
+
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        return clahe.apply(gray)
+
+    # ------------------------------------------------------------------
     # internal: feature detection
     # ------------------------------------------------------------------
 
-    def _create_detector(self) -> cv2.Feature2D:
-        """Instantiate the configured keypoint detector."""
-        if self.feature_method == "orb":
-            return cv2.ORB_create(nfeatures=self.max_features)
-        elif self.feature_method == "sift":
-            return cv2.SIFT_create(nfeatures=self.max_features)
-        elif self.feature_method == "akaze":
-            return cv2.AKAZE_create()
+    def _create_detector(self, method: str) -> cv2.Feature2D:
+        """Instantiate a keypoint detector by name."""
+        if method == "orb":
+            # WTA_K=2 is default — produces binary descriptors compatible with HAMMING
+            return cv2.ORB_create(
+                nfeatures=self.max_features,
+                scaleFactor=1.2,
+                nlevels=12,          # more pyramid levels for scale robustness
+                edgeThreshold=31,
+                patchSize=31,
+            )
+        elif method == "sift":
+            return cv2.SIFT_create(
+                nfeatures=self.max_features,
+                contrastThreshold=0.03,  # lower = more keypoints (default 0.04)
+            )
+        elif method == "akaze":
+            return cv2.AKAZE_create(
+                threshold=0.001,     # lower = more keypoints (default 0.001)
+            )
         else:
-            raise ValueError(f"Unknown feature method: {self.feature_method}")
+            raise ValueError(f"Unknown feature method: {method}")
 
     # ------------------------------------------------------------------
     # internal: matching
@@ -236,11 +348,11 @@ class ImageAligner:
             if is_binary:
                 index_params = dict(
                     algorithm=6,  # FLANN_INDEX_LSH
-                    table_number=6, key_size=12, multi_probe_level=1,
+                    table_number=12, key_size=20, multi_probe_level=2,
                 )
             else:
-                index_params = dict(algorithm=1, trees=5)  # FLANN_INDEX_KDTREE
-            return cv2.FlannBasedMatcher(index_params, dict(checks=50))
+                index_params = dict(algorithm=1, trees=5)
+            return cv2.FlannBasedMatcher(index_params, dict(checks=80))
 
         else:
             raise ValueError(f"Unknown match method: {self.match_method}")
@@ -274,18 +386,11 @@ class ImageAligner:
         kp_after: list,
         matches: list[cv2.DMatch],
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Estimate either homography or affine transform via RANSAC.
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            (transform_matrix, inlier_mask)
-        """
+        """Estimate homography or affine transform via RANSAC."""
         if len(matches) < self.min_match_count:
             raise RuntimeError(
                 f"Not enough matches: {len(matches)} found, "
-                f"need at least {self.min_match_count}. "
-                f"Images may be too different or lack texture."
+                f"need at least {self.min_match_count}."
             )
 
         pts_before = np.float32(
@@ -297,15 +402,11 @@ class ImageAligner:
         ).reshape(-1, 1, 2)
 
         if self.warp_method == WarpMethod.HOMOGRAPHY:
-            # 3x3 perspective transform — 8 DOF
-            # needs minimum 4 point pairs
             M, mask = cv2.findHomography(
                 pts_after, pts_before,
                 cv2.RANSAC, self.ransac_thresh,
             )
         else:
-            # 2x3 affine transform — 6 DOF (no perspective distortion)
-            # needs minimum 3 point pairs, more stable for distant/telephoto shots
             M, mask = cv2.estimateAffinePartial2D(
                 pts_after, pts_before,
                 method=cv2.RANSAC,
@@ -314,8 +415,8 @@ class ImageAligner:
 
         if M is None:
             raise RuntimeError(
-                "Transform estimation failed — returned None. "
-                "Matches may be degenerate (e.g. all collinear)."
+                "Transform estimation returned None — "
+                "matches may be degenerate (collinear, etc.)."
             )
 
         num_inliers = int(mask.ravel().sum()) if mask is not None else 0
@@ -338,17 +439,7 @@ class ImageAligner:
         transform: np.ndarray,
         inlier_mask: np.ndarray,
     ) -> float:
-        """Compute mean reprojection error for inlier matches.
-
-        Takes each inlier point in the after image, applies the transform,
-        and measures how far it lands from its matched point in the before
-        image. Lower = better alignment.
-
-        Returns
-        -------
-        float
-            Mean euclidean distance in pixels for inlier matches.
-        """
+        """Mean reprojection error on inlier matches (pixels)."""
         if inlier_mask is None or inlier_mask.ravel().sum() == 0:
             return float("inf")
 
@@ -362,18 +453,13 @@ class ImageAligner:
             [kp_before[m.queryIdx].pt for m in matches]
         ).reshape(-1, 2)
 
-        # apply transform to after points
         if transform.shape == (3, 3):
             projected = cv2.perspectiveTransform(pts_after, transform).reshape(-1, 2)
         else:
-            # affine: need to add a row to make it work with transform,
-            # or just do the math directly
             ones = np.ones((pts_after.shape[0], 1, 1), dtype=np.float32)
-            pts_h = np.concatenate([pts_after, ones], axis=2)  # (N, 1, 3)
-            # M is 2x3, so projected = pts @ M^T
-            projected = pts_h.reshape(-1, 3) @ transform.T  # (N, 2)
+            pts_h = np.concatenate([pts_after, ones], axis=2)
+            projected = pts_h.reshape(-1, 3) @ transform.T
 
-        # error only on inliers
         errors = np.linalg.norm(projected[mask_flat] - pts_before[mask_flat], axis=1)
         return float(errors.mean())
 
@@ -384,22 +470,7 @@ class ImageAligner:
     def _warp_image(
         self, image: np.ndarray, transform: np.ndarray, target_shape: tuple[int, int]
     ) -> np.ndarray:
-        """Apply the estimated transform to warp an image.
-
-        Parameters
-        ----------
-        image : np.ndarray
-            The image to warp (the "after" image).
-        transform : np.ndarray
-            3x3 homography or 2x3 affine matrix.
-        target_shape : tuple[int, int]
-            (height, width) of the output image.
-
-        Returns
-        -------
-        np.ndarray
-            Warped image.
-        """
+        """Apply the estimated transform to warp an image."""
         h, w = target_shape
 
         if transform.shape == (3, 3):

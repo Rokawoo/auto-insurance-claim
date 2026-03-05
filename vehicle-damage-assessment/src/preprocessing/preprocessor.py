@@ -95,7 +95,20 @@ class Preprocessor:
             Resized image.
         """
         # TODO: cv2.resize with INTER_AREA for downscale, INTER_LINEAR for upscale
-        raise NotImplementedError
+        initial_height = len(image)
+        initial_width = len(image[0])
+        target_height = self.target_size[0]
+        target_width = self.target_size[1]
+
+        scale_height = initial_height / target_height
+        scale_width = initial_width / target_width
+
+        # pure upscaling
+        if scale_height < 1 and scale_width < 1:
+            return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_LINEAR)
+        
+        # For pure downscaling and all the other cases
+        return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_AREA)
 
     def _to_grayscale(self, image: np.ndarray) -> np.ndarray:
         """Convert BGR image to single-channel grayscale.

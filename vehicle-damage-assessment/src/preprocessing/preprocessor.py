@@ -124,7 +124,8 @@ class Preprocessor:
             Grayscale image (H, W).
         """
         # TODO: cv2.cvtColor COLOR_BGR2GRAY
-        raise NotImplementedError
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return gray_image
 
     def _apply_clahe(self, image: np.ndarray) -> np.ndarray:
         """Apply Contrast-Limited Adaptive Histogram Equalization.

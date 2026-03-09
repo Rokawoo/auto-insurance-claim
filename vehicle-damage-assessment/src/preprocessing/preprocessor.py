@@ -52,7 +52,12 @@ class Preprocessor:
         #   2. convert to grayscale (if configured)
         #   3. apply CLAHE (if configured)
         #   4. gaussian blur
-        raise NotImplementedError
+
+        resized_image = self._resize(image)
+        grayscale_image = self._to_grayscale(resized_image)
+        clahe_image = self._apply_clahe(grayscale_image)
+        blur_image = self._blur(clahe_image)
+        return blur_image
 
     def process_pair(
         self, before: np.ndarray, after: np.ndarray
@@ -74,8 +79,10 @@ class Preprocessor:
         tuple[np.ndarray, np.ndarray]
             (processed_before, processed_after)
         """
+        before_image = self.process(before)
+        after_image = self.process(after)
         # TODO: call self.process on each image and return the pair
-        raise NotImplementedError
+        raise (before_image, after_image)
 
     # ------------------------------------------------------------------
     # internal helpers

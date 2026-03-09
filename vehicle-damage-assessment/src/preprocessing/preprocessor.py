@@ -145,7 +145,11 @@ class Preprocessor:
         """
         # TODO: create cv2.createCLAHE with clip_limit and tile_grid_size
         #       from self.clahe_cfg, then apply
-        raise NotImplementedError
+
+        # because it's grayscale, default tile
+        clahe = cv2.createCLAHE(clipLimit=self.clahe_cfg["clip_limit"], tileGridSize=self.clahe_cfg["tile_grid_size"])
+        result = clahe.apply(image)
+        return result
 
     def _blur(self, image: np.ndarray) -> np.ndarray:
         """Apply Gaussian blur for noise reduction.
@@ -160,5 +164,7 @@ class Preprocessor:
         np.ndarray
             Blurred image.
         """
+        kernel_size = (self.blur_kernel, self.blur_kernel)
+        blurred = cv2.GaussianBlur(image, kernel_size, self.blur_sigma)
         # TODO: cv2.GaussianBlur with self.blur_kernel and self.blur_sigma
-        raise NotImplementedError
+        return blurred

@@ -52,7 +52,16 @@ class Preprocessor:
         #   2. convert to grayscale (if configured)
         #   3. apply CLAHE (if configured)
         #   4. gaussian blur
-        raise NotImplementedError
+
+        # would it make more sense to blur then clahe? Reduce noise then magnify instead of magnifying noise then amplify with clahe
+        resized_image = self._resize(image)
+        if self.grayscale:
+            grayscale_image = self._to_grayscale(resized_image)
+            clahe_image = self._apply_clahe(grayscale_image)
+            blur_image = self._blur(clahe_image)
+            return blur_image
+        
+        return self._blur(resized_image)
 
     def process_pair(
         self, before: np.ndarray, after: np.ndarray
@@ -74,8 +83,10 @@ class Preprocessor:
         tuple[np.ndarray, np.ndarray]
             (processed_before, processed_after)
         """
+        before_image = self.process(before)
+        after_image = self.process(after)
         # TODO: call self.process on each image and return the pair
-        raise NotImplementedError
+        return (before_image, after_image)
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -95,7 +106,20 @@ class Preprocessor:
             Resized image.
         """
         # TODO: cv2.resize with INTER_AREA for downscale, INTER_LINEAR for upscale
-        raise NotImplementedError
+        initial_height = len(image)
+        initial_width = len(image[0])
+        target_height = self.target_size[0]
+        target_width = self.target_size[1]
+
+        scale_height = initial_height / target_height
+        scale_width = initial_width / target_width
+
+        # pure upscaling
+        if scale_height < 1 and scale_width < 1:
+            return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_LINEAR)
+        
+        # For pure downscaling and all the other cases
+        return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_AREA)
 
     def _to_grayscale(self, image: np.ndarray) -> np.ndarray:
         """Convert BGR image to single-channel grayscale.
@@ -111,7 +135,8 @@ class Preprocessor:
             Grayscale image (H, W).
         """
         # TODO: cv2.cvtColor COLOR_BGR2GRAY
-        raise NotImplementedError
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return gray_image
 
     def _apply_clahe(self, image: np.ndarray) -> np.ndarray:
         """Apply Contrast-Limited Adaptive Histogram Equalization.
@@ -131,7 +156,11 @@ class Preprocessor:
         """
         # TODO: create cv2.createCLAHE with clip_limit and tile_grid_size
         #       from self.clahe_cfg, then apply
-        raise NotImplementedError
+
+        # because it's grayscale, default tile
+        clahe = cv2.createCLAHE(clipLimit=self.clahe_cfg["clip_limit"], tileGridSize=self.clahe_cfg["tile_grid_size"])
+        result = clahe.apply(image)
+        return result
 
     def _blur(self, image: np.ndarray) -> np.ndarray:
         """Apply Gaussian blur for noise reduction.
@@ -146,5 +175,7 @@ class Preprocessor:
         np.ndarray
             Blurred image.
         """
+        kernel_size = (self.blur_kernel, self.blur_kernel)
+        blurred = cv2.GaussianBlur(image, kernel_size, self.blur_sigma)
         # TODO: cv2.GaussianBlur with self.blur_kernel and self.blur_sigma
-        raise NotImplementedError
+        return blurred

@@ -57,9 +57,9 @@ class Preprocessor:
         resized_image = self._resize(image)
         if self.grayscale:
             grayscale_image = self._to_grayscale(resized_image)
-            clahe_image = self._apply_clahe(grayscale_image)
-            blur_image = self._blur(clahe_image)
-            return blur_image
+            blur_image = self._blur(grayscale_image)
+            clahe_image = self._apply_clahe(blur_image)
+            return clahe_image
         
         return self._blur(resized_image)
 

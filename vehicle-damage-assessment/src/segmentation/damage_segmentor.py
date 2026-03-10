@@ -19,6 +19,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 
 @dataclass
@@ -92,8 +93,7 @@ class DamageSegmentor:
         bool
             True if the model file exists and segmentation is enabled.
         """
-        # TODO: check self.enabled and Path(self.model_path).exists()
-        raise NotImplementedError
+        return self.enabled and Path(self.model_path).exists()
 
     def load_model(self) -> None:
         """Load the fine-tuned YOLOv8-seg checkpoint.
@@ -103,10 +103,12 @@ class DamageSegmentor:
         FileNotFoundError
             If the model file does not exist.
         """
-        # TODO:
-        #   from ultralytics import YOLO
-        #   self.model = YOLO(self.model_path)
-        raise NotImplementedError
+        if not Path(self.model_path).exists():
+            raise FileNotFoundError(self.model_path)
+
+        from ultralytics import YOLO
+
+        self.model = YOLO(self.model_path)
 
     def segment(self, image: np.ndarray) -> SegmentationResult:
         """Run damage segmentation on a single image.
@@ -121,13 +123,26 @@ class DamageSegmentor:
         SegmentationResult
             Per-instance masks, types, and a combined class map.
         """
-        # TODO:
-        #   1. run inference
-        #   2. for each detection, extract mask + class + confidence
-        #   3. build DamageInstance list
-        #   4. merge masks into combined_mask and class_map
-        #   5. return SegmentationResult
-        raise NotImplementedError
+        if self.model is None:
+            self.load_model()
+
+        results = self.model(image, conf=0.1)
+
+        instances = self._parse_yolo_seg_results(results)
+
+        h, w = image.shape[:2]
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for inst in instances:
+            combined_mask = cv2.bitwise_or(combined_mask, inst.mask.astype(np.uint8))
+
+        class_map = self._build_class_map(instances, (h, w))
+
+        return SegmentationResult(
+            instances=instances,
+            combined_mask=combined_mask,
+            class_map=class_map,
+        )
 
     def segment_with_candidates(
         self,
@@ -152,12 +167,30 @@ class DamageSegmentor:
         SegmentationResult
             Filtered results where each instance overlaps the candidate mask.
         """
-        # TODO:
-        #   1. self.segment(image)
-        #   2. for each instance, compute IoU with candidate_mask
-        #   3. discard instances with zero overlap
-        #   4. rebuild combined_mask from surviving instances
-        raise NotImplementedError
+        base_result = self.segment(image)
+
+        filtered = []
+
+        for inst in base_result.instances:
+
+            overlap = cv2.bitwise_and(inst.mask.astype(np.uint8), candidate_mask)
+
+            if np.count_nonzero(overlap) > 0:
+                filtered.append(inst)
+
+        h, w = image.shape[:2]
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for inst in filtered:
+            combined_mask = cv2.bitwise_or(combined_mask, inst.mask.astype(np.uint8))
+
+        class_map = self._build_class_map(filtered, (h, w))
+
+        return SegmentationResult(
+            instances=filtered,
+            combined_mask=combined_mask,
+            class_map=class_map,
+        )
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -175,8 +208,47 @@ class DamageSegmentor:
         -------
         list[DamageInstance]
         """
-        # TODO: iterate results[0].masks and results[0].boxes
-        raise NotImplementedError
+        instances = []
+
+        if len(results) == 0:
+            return instances
+
+        r = results[0]
+
+        if r.masks is None:
+            return instances
+
+        masks = r.masks.data.cpu().numpy()
+        boxes = r.boxes
+
+        for i in range(len(masks)):
+            conf = float(boxes.conf[i])
+
+            if conf < self.conf_threshold:
+                continue
+
+            class_id = int(boxes.cls[i])
+            damage_type = self.damage_classes.get(class_id, str(class_id))
+
+            mask = masks[i].astype(np.uint8)
+            if mask.shape != r.orig_shape[:2]:
+                mask = cv2.resize(mask, (r.orig_shape[1], r.orig_shape[0]))
+
+            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
+
+            area = int(np.count_nonzero(mask))
+
+            inst = DamageInstance(
+                damage_type=damage_type,
+                confidence=conf,
+                mask=mask,
+                bbox=(x1, y1, x2, y2),
+                area_px=area,
+            )
+
+            instances.append(inst)
+
+        return instances
 
     def _build_class_map(
         self, instances: list[DamageInstance], image_shape: tuple[int, int]
@@ -194,5 +266,16 @@ class DamageSegmentor:
         np.ndarray
             Class map where 0 = background, positive ints = class IDs.
         """
-        # TODO: overlay each instance mask with its class ID
-        raise NotImplementedError
+        h, w = image_shape
+
+        class_map = np.zeros((h, w), dtype=np.uint8)
+
+        for inst in instances:
+
+            class_id = list(self.damage_classes.keys())[
+                list(self.damage_classes.values()).index(inst.damage_type)
+            ]
+
+            class_map[inst.mask.astype(bool)] = class_id + 1
+
+        return class_map

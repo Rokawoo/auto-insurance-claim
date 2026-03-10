@@ -53,11 +53,15 @@ class Preprocessor:
         #   3. apply CLAHE (if configured)
         #   4. gaussian blur
 
+        # would it make more sense to blur then clahe? Reduce noise then magnify instead of magnifying noise then amplify with clahe
         resized_image = self._resize(image)
-        grayscale_image = self._to_grayscale(resized_image)
-        clahe_image = self._apply_clahe(grayscale_image)
-        blur_image = self._blur(clahe_image)
-        return blur_image
+        if self.grayscale:
+            grayscale_image = self._to_grayscale(resized_image)
+            clahe_image = self._apply_clahe(grayscale_image)
+            blur_image = self._blur(clahe_image)
+            return blur_image
+        
+        return self._blur(resized_image)
 
     def process_pair(
         self, before: np.ndarray, after: np.ndarray
@@ -82,7 +86,7 @@ class Preprocessor:
         before_image = self.process(before)
         after_image = self.process(after)
         # TODO: call self.process on each image and return the pair
-        raise (before_image, after_image)
+        return (before_image, after_image)
 
     # ------------------------------------------------------------------
     # internal helpers

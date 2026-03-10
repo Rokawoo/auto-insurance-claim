@@ -30,29 +30,45 @@ class TestPreprocessor:
     def test_init(self, default_config):
         """Preprocessor initializes without error."""
         # TODO: instantiate and assert attributes are set correctly
-        pass
+        preprocessor = Preprocessor(default_config)
+        assert isinstance(preprocessor, Preprocessor)
 
     def test_process_returns_correct_shape(self, default_config, sample_bgr_image):
         """process() should return an image of target_size."""
         # TODO: call process, assert output shape matches target_size
-        pass
+        preprocessor = Preprocessor(default_config)
+        output_image = preprocessor.process(sample_bgr_image)
+        assert tuple(default_config["target_size"]) == output_image.shape
 
     def test_process_grayscale_single_channel(self, default_config, sample_bgr_image):
         """When grayscale=True, output should be single-channel."""
         # TODO: assert output.ndim == 2
-        pass
+        preprocessor = Preprocessor(default_config)
+        output_image = preprocessor._to_grayscale(sample_bgr_image)
+        assert output_image.ndim == 2
 
     def test_process_pair_returns_two_images(self, default_config, sample_bgr_image):
         """process_pair should return a tuple of two processed images."""
         # TODO: call process_pair with two images, check tuple length
-        pass
+        preprocessor = Preprocessor(default_config)
+        output_image = preprocessor.process_pair(sample_bgr_image, sample_bgr_image)
+        assert len(output_image) == 2
 
     def test_process_no_grayscale(self, default_config, sample_bgr_image):
         """When grayscale=False, output should remain 3-channel."""
         # TODO: modify config, assert output.ndim == 3
-        pass
-
-    def test_blur_reduces_noise(self, default_config):
+        copy = default_config
+        copy["grayscale"] = False
+        preprocessor = Preprocessor(copy)
+        output_image = preprocessor.process(sample_bgr_image)
+        assert output_image.ndim == 3
+        
+    def test_blur_reduces_noise(self, default_config, sample_bgr_image):
         """Blurring a noisy image should reduce pixel variance."""
         # TODO: create noisy image, process, compare variance before/after
-        pass
+        original = sample_bgr_image
+        preprocessor = Preprocessor(default_config)
+        output_image = preprocessor._blur(sample_bgr_image)
+        original_variance = np.var(original)
+        new_variance = np.var(output_image)
+        assert original_variance > new_variance

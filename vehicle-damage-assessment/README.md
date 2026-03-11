@@ -16,7 +16,7 @@ images of the same vehicle.
 │                                                                     │
 │  ┌──────────┐   ┌───────────┐   ┌───────────┐   ┌──────────────┐    │
 │  │  PREPROC │──▶│ ALIGNMENT│──▶│ DETECTION │─▶│  COMPARISON  │    │
-│  │          │   │           │   │  (YOLOv8) │   │  (diff map)  │    │
+│  │          │   │           │   │  (YOLOv11) │   │  (diff map)  │    │
 │  └──────────┘   └───────────┘   └───────────┘   └──────┬───────┘    │
 │                                                         │           │
 │                                                         ▼           │
@@ -37,9 +37,9 @@ images of the same vehicle.
 
 1. **Preprocessing** — Normalize lighting, resize, grayscale, denoise (Gaussian blur)
 2. **Alignment** — Feature matching (ORB/SIFT) + homography warp to spatially align before/after
-3. **Detection** — YOLOv8 vehicle detection to create a vehicle-only ROI mask
+3. **Detection** — YOLOv11 vehicle detection to create a vehicle-only ROI mask
 4. **Comparison** — Pixel-wise diff within the vehicle mask, thresholded to find damage candidates
-5. **Segmentation** — Optional YOLOv8-seg fine-tuned model to classify damage types (scratch, dent, crack)
+5. **Segmentation** — Optional YOLOv11-seg fine-tuned model to classify damage types (scratch, dent, crack)
 6. **Report** — Annotated output images + structured JSON damage report
 
 ## Project Structure
@@ -49,7 +49,7 @@ vda/
 ├── src/
 │   ├── preprocessing/    # image normalization, denoising, resizing
 │   ├── alignment/        # feature matching, homography, image warping
-│   ├── detection/        # YOLOv8 vehicle detection + ROI masking
+│   ├── detection/        # YOLOv11 vehicle detection + ROI masking
 │   ├── segmentation/     # damage type segmentation (fine-tuned YOLO-seg)
 │   ├── comparison/       # pixel differencing, threshold, contour extraction
 │   ├── pipeline/         # orchestration — ties all stages together

@@ -8,7 +8,7 @@ Run:
     cd vda/
     python -m pytest tests/test_vehicle_detector.py -v -s
 
-These tests verify that YOLOv8 actually finds a car in the photos
+These tests verify that YOLOv11 actually finds a car in the photos
 and produces a usable binary mask.
 """
 
@@ -87,7 +87,7 @@ def after_result(detector, after_bgr):
 class TestModelLoading:
 
     def test_model_loads(self, detector):
-        """YOLOv8 model should load without error."""
+        """YOLOv11 model should load without error."""
         assert detector.model is not None
         print(f"\n  model loaded: {detector.model_name}")
 

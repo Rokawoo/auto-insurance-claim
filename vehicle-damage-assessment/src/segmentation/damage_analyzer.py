@@ -1,9 +1,4 @@
-"""Heuristic damage analysis from diff contours — no trained model required.
-
-Instead of a fine-tuned segmentation model, this module inspects the
-geometric and intensity properties of each contour the DiffEngine found
-and makes a best-effort classification.
-"""
+"""Advanced heuristic damage scoring with certainty classification."""
 
 from __future__ import annotations
 
@@ -17,25 +12,22 @@ import numpy as np
 
 
 class DamageType(str, Enum):
-    """Supported damage type labels."""
-    SCRATCH = "scratch"
-    DENT = "dent"
-    CRACK = "crack"
-    SHATTER = "shatter"
-    SCUFF = "scuff"
-    UNKNOWN = "unknown"
+    TRUE = "damage"
+    UNCERTAIN = "uncertain"
 
 
 @dataclass
 class DamageRegion:
-    """A single analyzed damage region."""
     contour: np.ndarray = field(repr=False)
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
     area_px: int = 0
     perimeter: float = 0.0
-    damage_type: DamageType = DamageType.UNKNOWN
+    damage_type: DamageType = DamageType.UNCERTAIN
     severity_score: float = 0.0
+    confidence: float = 0.0
     mean_intensity: float = 0.0
+    gradient_strength: float = 0.0
+    texture_variance: float = 0.0
     circularity: float = 0.0
     aspect_ratio: float = 1.0
     solidity: float = 1.0
@@ -43,7 +35,6 @@ class DamageRegion:
 
 @dataclass
 class AnalysisResult:
-    """Complete damage analysis output."""
     regions: list[DamageRegion] = field(default_factory=list)
     total_damage_area_px: int = 0
     overall_severity: str = "none"
@@ -52,7 +43,6 @@ class AnalysisResult:
 
 
 class DamageAnalyzer:
-    """Classifies and scores damage regions using contour geometry heuristics."""
 
     SEVERITY_LABELS = [
         (0.05, "none"),
@@ -63,30 +53,34 @@ class DamageAnalyzer:
     ]
 
     def __init__(self, config: dict | None = None) -> None:
+
         cfg = config or {}
 
-        # Severity scoring weights
-        self.intensity_weight: float = cfg.get("intensity_weight", 0.40)
-        self.area_weight: float = cfg.get("area_weight", 0.35)
-        self.count_weight: float = cfg.get("count_weight", 0.25)
+        self.intensity_weight = cfg.get("intensity_weight", 0.35)
+        self.area_weight = cfg.get("area_weight", 0.35)
+        self.gradient_weight = cfg.get("gradient_weight", 0.20)
+        self.texture_weight = cfg.get("texture_weight", 0.10)
 
-        # Ensure weights sum to exactly 1.0 to prevent score inflation
-        total_weight = self.intensity_weight + self.area_weight + self.count_weight
-        if not math.isclose(total_weight, 1.0, abs_tol=1e-5):
-            self.intensity_weight /= total_weight
-            self.area_weight /= total_weight
-            self.count_weight /= total_weight
+        total = (
+            self.intensity_weight
+            + self.area_weight
+            + self.gradient_weight
+            + self.texture_weight
+        )
 
-        # Classification thresholds
-        self.scratch_min_aspect: float = cfg.get("scratch_min_aspect", 3.0)
-        self.scratch_max_solidity: float = cfg.get("scratch_max_solidity", 0.6)
-        self.dent_min_circularity: float = cfg.get("dent_min_circularity", 0.4)
-        self.shatter_min_area_frac: float = cfg.get("shatter_min_area_frac", 0.05)
-        self.scuff_max_intensity: float = cfg.get("scuff_max_intensity", 40.0)
-        self.scuff_max_area: int = cfg.get("scuff_max_area", 2000)
+        if not math.isclose(total, 1.0, abs_tol=1e-5):
+            self.intensity_weight /= total
+            self.area_weight /= total
+            self.gradient_weight /= total
+            self.texture_weight /= total
 
-    # ------------------------------------------------------------------
-    # Public API
+        self.min_area = cfg.get("min_region_area", 120)
+        self.max_aspect_ratio = cfg.get("max_aspect_ratio", 6.0)
+        self.min_solidity = cfg.get("min_solidity", 0.55)
+        self.edge_margin = cfg.get("edge_margin", 8)
+
+        self.true_damage_threshold = cfg.get("true_damage_threshold", 0.55)
+
     # ------------------------------------------------------------------
 
     def analyze(
@@ -95,156 +89,209 @@ class DamageAnalyzer:
         diff_image: np.ndarray,
         vehicle_mask: np.ndarray | None = None,
     ) -> AnalysisResult:
-        """Analyze all damage contours from a DiffResult."""
+
         if not contours:
             return AnalysisResult()
 
-        # Compute vehicle area safely
         if vehicle_mask is not None:
             vehicle_area = int(np.count_nonzero(vehicle_mask))
         else:
             vehicle_area = diff_image.shape[0] * diff_image.shape[1]
-        
+
         vehicle_area = max(vehicle_area, 1)
 
-        # Process regions
-        regions = [self._analyze_region(c, diff_image, vehicle_area) for c in contours]
-        
-        # Aggregate stats
-        total_area = sum(r.area_px for r in regions)
-        type_summary = {}
-        for r in regions:
-            name = r.damage_type.value
-            type_summary[name] = type_summary.get(name, 0) + 1
+        regions: list[DamageRegion] = []
 
-        overall_score = self._compute_overall_severity(regions, total_area, vehicle_area)
-        
+        grad = cv2.Sobel(diff_image, cv2.CV_32F, 1, 1, ksize=3)
+        grad = cv2.convertScaleAbs(grad)
+
+        for contour in contours:
+
+            region = self._analyze_region(
+                contour,
+                diff_image,
+                grad,
+                vehicle_area,
+                vehicle_mask,
+            )
+
+            if region:
+                regions.append(region)
+
+        total_area = sum(r.area_px for r in regions)
+
+        overall_score = self._compute_overall_severity(
+            regions,
+            total_area,
+            vehicle_area,
+        )
+
+        summary = {"damage": 0, "uncertain": 0}
+
+        for r in regions:
+            summary[r.damage_type.value] += 1
+
         return AnalysisResult(
             regions=regions,
             total_damage_area_px=total_area,
             overall_severity=self._score_to_label(overall_score),
             overall_severity_score=round(overall_score, 4),
-            damage_type_summary=type_summary,
+            damage_type_summary=summary,
         )
 
-    # ------------------------------------------------------------------
-    # Internal: Per-region analysis
     # ------------------------------------------------------------------
 
     def _analyze_region(
-        self, contour: np.ndarray, diff_image: np.ndarray, vehicle_area: int
-    ) -> DamageRegion:
-        """Compute geometric features and classify a single contour."""
+        self,
+        contour,
+        diff_image,
+        grad,
+        vehicle_area,
+        vehicle_mask,
+    ) -> DamageRegion | None:
+
         area = cv2.contourArea(contour)
-        perimeter = cv2.arcLength(contour, closed=True)
+
+        if area < self.min_area:
+            return None
+
         x, y, w, h = cv2.boundingRect(contour)
 
-        # Geometric features with division-by-zero protection
-        circularity = (4.0 * np.pi * area) / max(perimeter * perimeter, 1e-5)
+        perimeter = cv2.arcLength(contour, True)
+
+        circularity = (4 * np.pi * area) / max(perimeter * perimeter, 1e-5)
+
         aspect_ratio = max(w, h) / max(min(w, h), 1e-5)
-        
+
         hull_area = cv2.contourArea(cv2.convexHull(contour))
         solidity = area / max(hull_area, 1e-5)
 
-        # OPTIMIZATION: Localized Intensity Measurement
-        # Shift contour to local ROI coordinates to avoid drawing massive masks
-        roi_diff = diff_image[y:y+h, x:x+w]
-        local_mask = np.zeros((h, w), dtype=np.uint8)
-        shifted_contour = contour - [x, y]
-        cv2.drawContours(local_mask, [shifted_contour], -1, 255, thickness=-1)
-        
-        mean_intensity = float(cv2.mean(roi_diff, mask=local_mask)[0])
+        if aspect_ratio > self.max_aspect_ratio:
+            return None
 
-        # Classify & Score
+        if solidity < self.min_solidity:
+            return None
+
+        if vehicle_mask is not None:
+            if (
+                x < self.edge_margin
+                or y < self.edge_margin
+                or x + w >= vehicle_mask.shape[1] - self.edge_margin
+                or y + h >= vehicle_mask.shape[0] - self.edge_margin
+            ):
+                return None
+
+        roi_diff = diff_image[y:y+h, x:x+w]
+        roi_grad = grad[y:y+h, x:x+w]
+
+        mask = np.zeros((h, w), dtype=np.uint8)
+        shifted = contour - [x, y]
+
+        cv2.drawContours(mask, [shifted], -1, 255, -1)
+
+        mean_intensity = float(cv2.mean(roi_diff, mask=mask)[0])
+        gradient_strength = float(cv2.mean(roi_grad, mask=mask)[0])
+
+        pixels = roi_diff[mask > 0]
+        texture_variance = float(np.var(pixels)) if pixels.size else 0.0
+
         area_frac = area / vehicle_area
-        damage_type = self._classify_type(
-            area, area_frac, circularity, aspect_ratio, solidity, mean_intensity
+
+        severity = self._region_severity(
+            area_frac,
+            mean_intensity,
+            gradient_strength,
+            texture_variance,
         )
-        severity = self._region_severity(area_frac, mean_intensity, damage_type)
+
+        confidence = self._confidence_score(
+            area_frac,
+            mean_intensity,
+            gradient_strength,
+            texture_variance,
+        )
+
+        label = (
+            DamageType.TRUE
+            if confidence >= self.true_damage_threshold
+            else DamageType.UNCERTAIN
+        )
 
         return DamageRegion(
             contour=contour,
             bbox=(x, y, w, h),
             area_px=int(area),
             perimeter=round(perimeter, 2),
-            damage_type=damage_type,
+            damage_type=label,
             severity_score=round(severity, 4),
+            confidence=round(confidence, 4),
             mean_intensity=round(mean_intensity, 2),
+            gradient_strength=round(gradient_strength, 2),
+            texture_variance=round(texture_variance, 2),
             circularity=round(circularity, 4),
             aspect_ratio=round(aspect_ratio, 4),
             solidity=round(solidity, 4),
         )
 
-    def _classify_type(
-        self, area: float, area_frac: float, circularity: float, 
-        aspect_ratio: float, solidity: float, mean_intensity: float
-    ) -> DamageType:
-        """Heuristic damage type classification from geometric features."""
-        if mean_intensity < self.scuff_max_intensity and area < self.scuff_max_area:
-            return DamageType.SCUFF
-
-        if aspect_ratio >= self.scratch_min_aspect and solidity <= self.scratch_max_solidity:
-            return DamageType.SCRATCH
-
-        if area_frac >= self.shatter_min_area_frac and solidity < 0.5:
-            return DamageType.SHATTER
-
-        if circularity >= self.dent_min_circularity and solidity > 0.7:
-            return DamageType.DENT
-
-        if circularity < 0.3 and solidity < 0.7:
-            return DamageType.CRACK
-
-        return DamageType.UNKNOWN
-
-    def _region_severity(
-        self, area_frac: float, mean_intensity: float, damage_type: DamageType
-    ) -> float:
-        """Score a single region's severity from 0.0 to 1.0."""
-        area_score = min(area_frac / 0.15, 1.0)
-        intensity_score = min(mean_intensity / 200.0, 1.0)
-
-        type_multipliers = {
-            DamageType.SCUFF: 0.3,
-            DamageType.SCRATCH: 0.5,
-            DamageType.DENT: 0.7,
-            DamageType.CRACK: 0.85,
-            DamageType.SHATTER: 1.0,
-            DamageType.UNKNOWN: 0.5,
-        }
-        type_mult = type_multipliers.get(damage_type, 0.5)
-
-        raw = 0.4 * area_score + 0.3 * intensity_score + 0.3 * type_mult
-        return min(max(raw, 0.0), 1.0)
-
-    # ------------------------------------------------------------------
-    # Internal: Overall severity
     # ------------------------------------------------------------------
 
-    def _compute_overall_severity(
-        self, regions: list[DamageRegion], total_damage_area: int, vehicle_area: int
-    ) -> float:
-        """Weighted composite severity score for the entire vehicle."""
+    def _confidence_score(self, area, intensity, gradient, texture):
+
+        area_score = min(area / 0.12, 1.0)
+        intensity_score = min(intensity / 180.0, 1.0)
+        gradient_score = min(gradient / 120.0, 1.0)
+        texture_score = min(texture / 2000.0, 1.0)
+
+        return float(
+            0.35 * area_score
+            + 0.30 * intensity_score
+            + 0.20 * gradient_score
+            + 0.15 * texture_score
+        )
+
+    # ------------------------------------------------------------------
+
+    def _region_severity(self, area, intensity, gradient, texture):
+
+        area_score = min(area / 0.12, 1.0)
+        intensity_score = min(intensity / 180.0, 1.0)
+        gradient_score = min(gradient / 120.0, 1.0)
+        texture_score = min(texture / 2000.0, 1.0)
+
+        score = (
+            self.area_weight * area_score
+            + self.intensity_weight * intensity_score
+            + self.gradient_weight * gradient_score
+            + self.texture_weight * texture_score
+        )
+
+        return float(np.clip(score, 0.0, 1.0))
+
+    # ------------------------------------------------------------------
+
+    def _compute_overall_severity(self, regions, total_area, vehicle_area):
+
         if not regions:
             return 0.0
 
-        sorted_regions = sorted(regions, key=lambda r: r.severity_score, reverse=True)
-        top_n = sorted_regions[:min(3, len(sorted_regions))]
-        intensity_component = sum(r.severity_score for r in top_n) / len(top_n)
+        top = sorted(regions, key=lambda r: r.severity_score, reverse=True)[:3]
 
-        area_component = min((total_damage_area / vehicle_area) / 0.25, 1.0)
-        count_component = min(len(regions) / 10.0, 1.0)
+        intensity_component = sum(r.severity_score for r in top) / len(top)
 
-        score = (
-            self.intensity_weight * intensity_component
-            + self.area_weight * area_component
-            + self.count_weight * count_component
-        )
-        return min(max(score, 0.0), 1.0)
+        area_component = min((total_area / vehicle_area) / 0.25, 1.0)
 
-    def _score_to_label(self, score: float) -> str:
-        """Convert a 0-1 score to a severity label."""
+        count_component = min(len(regions) / 8.0, 1.0)
+
+        score = 0.5 * intensity_component + 0.35 * area_component + 0.15 * count_component
+
+        return float(np.clip(score, 0.0, 1.0))
+
+    # ------------------------------------------------------------------
+
+    def _score_to_label(self, score):
+
         for threshold, label in self.SEVERITY_LABELS:
             if score < threshold:
                 return label
+
         return "critical"

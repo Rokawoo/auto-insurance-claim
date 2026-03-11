@@ -51,7 +51,7 @@ def gray_pair():
 
 @pytest.fixture(scope="module")
 def vehicle_mask(gray_pair):
-    """Run YOLOv8 to get a real vehicle mask."""
+    """Run YOLOv11 to get a real vehicle mask."""
     before_bgr = cv2.imread(str(BEFORE_PATH))
     from src.detection.vehicle_detector import VehicleDetector
     det = VehicleDetector({"confidence_threshold": 0.3})

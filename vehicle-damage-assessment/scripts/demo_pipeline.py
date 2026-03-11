@@ -108,7 +108,7 @@ def main():
     save(out_dir / "02_warped.png", label(warped_bgr, "ALIGNED AFTER"))
 
     # 3. DETECT VEHICLE
-    print(f"\n[3/7] Detecting Vehicle (YOLOv8)...")
+    print(f"\n[3/7] Detecting Vehicle (YOLOv11)...")
     detector = VehicleDetector({"confidence_threshold": 0.3})
     res_det = detector.detect(before_bgr)
     

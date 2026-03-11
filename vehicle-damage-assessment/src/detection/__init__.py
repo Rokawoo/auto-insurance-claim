@@ -1,4 +1,4 @@
-"""Detection — YOLOv8-based vehicle detection and ROI masking."""
+"""Detection — YOLOv11-based vehicle detection and ROI masking."""
 
 from src.detection.vehicle_detector import VehicleDetector
 

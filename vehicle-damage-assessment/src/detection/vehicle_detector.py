@@ -1,4 +1,4 @@
-"""YOLOv8-based vehicle instance segmentation and ROI mask generation.
+"""YOLOv11-based vehicle instance segmentation and ROI mask generation.
 
 This is the critical gatekeeper between alignment and comparison.
 Produces a precise polygonal mask using instance segmentation so the 
@@ -45,7 +45,7 @@ class DetectionResult:
 class VehicleDetector:
     """Detects vehicles and produces a precise binary ROI mask.
 
-    Uses a YOLOv8 segmentation model to find cars, trucks, and buses. 
+    Uses a YOLOv11 segmentation model to find cars, trucks, and buses. 
     The polygon segments are converted into a dilated binary mask.
     """
 
@@ -65,7 +65,7 @@ class VehicleDetector:
         self.model = None
 
     def load_model(self) -> None:
-        """Load the YOLOv8 segmentation model."""
+        """Load the YOLOv11 segmentation model."""
         try:
             from ultralytics import YOLO
         except ImportError:

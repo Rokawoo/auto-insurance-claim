@@ -25,7 +25,7 @@ alignment:
   normalize_exposure: true        # CLAHE before feature detection
 
 detection:
-  model_name: "yolo11m.pt"       # pretrained yolo weights (COCO)
+  model_name: "yolo11m-seg.pt"       # pretrained yolo weights (COCO)
   vehicle_classes: [2, 5, 7]     # COCO: car=2, bus=5, truck=7
   confidence_threshold: 0.5
   iou_threshold: 0.45

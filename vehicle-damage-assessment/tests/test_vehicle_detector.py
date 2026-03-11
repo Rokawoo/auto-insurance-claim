@@ -55,7 +55,7 @@ def after_bgr():
 @pytest.fixture(scope="module")
 def default_config():
     return {
-        "model_name": "yolo11m.pt",
+        "model_name": "yolo11m-seg.pt",
         "vehicle_classes": [2, 5, 7],
         "confidence_threshold": 0.3,   # slightly lower for real photos
         "iou_threshold": 0.45,

@@ -2,7 +2,7 @@
 """Visualize alignment + difference maps on real car images.
 
 All paths resolve from the project root (this script's grandparent dir).
-Images read from tests/images/, output written to tests/output/.
+Images read from tests/images/, outputs written to tests/outputs/.
 
 Produces:
     01_inputs.png              side-by-side raw inputs
@@ -39,7 +39,7 @@ from src.alignment.aligner import ImageAligner, AlignmentResult, WarpMethod
 
 DEFAULT_BEFORE = TESTS_DIR / "images" / "car A - 1.png"
 DEFAULT_AFTER  = TESTS_DIR / "images" / "car A - 2.png"
-DEFAULT_OUTPUT = TESTS_DIR / "output" / "alignment_demo"
+DEFAULT_outputs = TESTS_DIR / "outputs" / "alignment_demo"
 
 
 # ─── helpers ────────────────────────────────────────────────────
@@ -108,12 +108,12 @@ def main():
     parser = argparse.ArgumentParser(description="Alignment + diff demo")
     parser.add_argument("--before", type=Path, default=DEFAULT_BEFORE)
     parser.add_argument("--after", type=Path, default=DEFAULT_AFTER)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--outputs", type=Path, default=DEFAULT_outputs)
     parser.add_argument("--method", default="orb", choices=["orb", "sift", "akaze"])
     parser.add_argument("--warp", default="homography", choices=["homography", "affine"])
     args = parser.parse_args()
 
-    out = args.output
+    out = args.outputs
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 65)

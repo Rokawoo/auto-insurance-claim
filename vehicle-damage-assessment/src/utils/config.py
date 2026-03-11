@@ -58,7 +58,7 @@ def _get_defaults() -> dict:
             "normalize_exposure": True,
         },
         "detection": {
-            "model_name": "yolo11m.pt",
+            "model_name": "yolo11m-seg.pt",
             "vehicle_classes": [2, 5, 7],
             "confidence_threshold": 0.5,
             "iou_threshold": 0.45,

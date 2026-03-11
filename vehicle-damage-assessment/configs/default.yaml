@@ -13,14 +13,19 @@ preprocessing:
 
 alignment:
   feature_method: "orb"           # "orb" | "sift" | "akaze"
-  max_features: 5000
+  max_features: 10000
   match_method: "bf"              # "bf" (brute force) | "flann"
   ratio_threshold: 0.75           # lowe's ratio test
   ransac_reproj_threshold: 5.0
   min_match_count: 10
+  warp_method: "homography"       # "homography" | "affine"
+  max_reprojection_error: 5.0     # reliability threshold (px)
+  min_inlier_ratio: 0.25          # reliability threshold
+  fallback: true                  # try other detectors if primary fails
+  normalize_exposure: true        # CLAHE before feature detection
 
 detection:
-  model_name: "yolov8s.pt"       # pretrained yolo weights
+  model_name: "yolo11m.pt"       # pretrained yolo weights (COCO)
   vehicle_classes: [2, 5, 7]     # COCO: car=2, bus=5, truck=7
   confidence_threshold: 0.5
   iou_threshold: 0.45
@@ -34,16 +39,20 @@ comparison:
   min_contour_area: 500           # ignore tiny diff blobs (px^2)
   max_contour_area: 100000        # ignore huge blobs (probably misalign)
 
-segmentation:
-  enabled: false                  # set true once fine-tuned model exists
-  model_path: "models/finetuned/damage_seg.pt"
-  damage_classes:
-    0: "scratch"
-    1: "dent"
-    2: "crack"
-    3: "shatter"
-    4: "deformation"
-  confidence_threshold: 0.4
+# heuristic damage analysis — classifies contours by geometry, no ML model needed
+analysis:
+  # overall severity scoring weights (should sum to 1.0)
+  intensity_weight: 0.40          # weight of diff intensity signal
+  area_weight: 0.35               # weight of total damage area
+  count_weight: 0.25              # weight of number of regions
+
+  # classification thresholds
+  scratch_min_aspect: 3.0         # min bounding-rect aspect ratio for scratch
+  scratch_max_solidity: 0.6       # max contour solidity for scratch
+  dent_min_circularity: 0.4       # min circularity for dent classification
+  shatter_min_area_frac: 0.05     # min vehicle-area fraction for shatter
+  scuff_max_intensity: 40.0       # max mean diff intensity for scuff
+  scuff_max_area: 2000            # max pixel area for scuff
 
 output:
   save_visualizations: true

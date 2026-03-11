@@ -24,10 +24,11 @@ class Preprocessor:
     """
 
     def __init__(self, config: dict) -> None:
+        # OpenCV uses (width, height) for resize, but arrays are (height, width).
         self.target_size: tuple[int, int] = tuple(config.get("target_size", [640, 640]))
         self.grayscale: bool = config.get("grayscale", True)
         self.blur_kernel: int = config.get("blur_kernel", 5)
-        self.blur_sigma: int = config.get("blur_sigma", 0)
+        self.blur_sigma: float = float(config.get("blur_sigma", 0))
         self.clahe_cfg: dict = config.get("clahe", {})
 
     # ------------------------------------------------------------------
@@ -35,147 +36,74 @@ class Preprocessor:
     # ------------------------------------------------------------------
 
     def process(self, image: np.ndarray) -> np.ndarray:
-        """Run the full preprocessing chain on a single image.
+        """Run the full preprocessing chain on a single image."""
+        if image is None or not isinstance(image, np.ndarray) or image.size == 0:
+            raise ValueError("Invalid or empty input image provided.")
 
-        Parameters
-        ----------
-        image : np.ndarray
-            Input BGR image as loaded by ``cv2.imread``.
+        # 1. Resize (Standardize dimensions)
+        result = self._resize(image)
 
-        Returns
-        -------
-        np.ndarray
-            Preprocessed image ready for downstream stages.
-        """
-        # TODO: implement the full chain by calling the helpers below
-        #   1. resize
-        #   2. convert to grayscale (if configured)
-        #   3. apply CLAHE (if configured)
-        #   4. gaussian blur
-
-        # would it make more sense to blur then clahe? Reduce noise then magnify instead of magnifying noise then amplify with clahe
-        resized_image = self._resize(image)
+        # 2. Grayscale (Optional)
         if self.grayscale:
-            grayscale_image = self._to_grayscale(resized_image)
-            blur_image = self._blur(grayscale_image)
-            clahe_image = self._apply_clahe(blur_image)
-            return clahe_image
-        
-        return self._blur(resized_image)
+            result = self._to_grayscale(result)
+
+        # 3. Blur (Do this BEFORE CLAHE to avoid amplifying sensor noise)
+        if self.blur_kernel > 0:
+            result = self._blur(result)
+
+        # 4. CLAHE (Normalize contrast)
+        if self.clahe_cfg.get("enabled", False):
+            result = self._apply_clahe(result)
+
+        return result
 
     def process_pair(
         self, before: np.ndarray, after: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Preprocess a before/after image pair.
-
-        Ensures both images go through identical transforms so they are
-        directly comparable in later stages.
-
-        Parameters
-        ----------
-        before : np.ndarray
-            "Before" image (undamaged vehicle).
-        after : np.ndarray
-            "After" image (damaged vehicle).
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            (processed_before, processed_after)
-        """
-        before_image = self.process(before)
-        after_image = self.process(after)
-        # TODO: call self.process on each image and return the pair
-        return (before_image, after_image)
+        """Preprocess a before/after image pair identically."""
+        return self.process(before), self.process(after)
 
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
 
     def _resize(self, image: np.ndarray) -> np.ndarray:
-        """Resize image to ``self.target_size`` using area interpolation.
+        """Resize image to ``self.target_size``.
 
-        Parameters
-        ----------
-        image : np.ndarray
-            Input image (any size).
-
-        Returns
-        -------
-        np.ndarray
-            Resized image.
+        Uses INTER_AREA for downscaling (avoids aliasing) and
+        INTER_LINEAR for upscaling.
         """
-        # TODO: cv2.resize with INTER_AREA for downscale, INTER_LINEAR for upscale
-        initial_height = len(image)
-        initial_width = len(image[0])
-        target_height = self.target_size[0]
-        target_width = self.target_size[1]
+        h, w = image.shape[:2]
+        tw, th = self.target_size  # (width, height)
 
-        scale_height = initial_height / target_height
-        scale_width = initial_width / target_width
-
-        # pure upscaling
-        if scale_height < 1 and scale_width < 1:
-            return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_LINEAR)
-        
-        # For pure downscaling and all the other cases
-        return cv2.resize(image, (target_height, target_width), interpolation=cv2.INTER_AREA)
+        interp = cv2.INTER_AREA if (h * w > th * tw) else cv2.INTER_LINEAR
+        return cv2.resize(image, (tw, th), interpolation=interp)
 
     def _to_grayscale(self, image: np.ndarray) -> np.ndarray:
-        """Convert BGR image to single-channel grayscale.
-
-        Parameters
-        ----------
-        image : np.ndarray
-            BGR image.
-
-        Returns
-        -------
-        np.ndarray
-            Grayscale image (H, W).
-        """
-        # TODO: cv2.cvtColor COLOR_BGR2GRAY
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return gray_image
-
-    def _apply_clahe(self, image: np.ndarray) -> np.ndarray:
-        """Apply Contrast-Limited Adaptive Histogram Equalization.
-
-        Normalizes local contrast so that lighting differences between
-        the before/after pair don't create false diff regions.
-
-        Parameters
-        ----------
-        image : np.ndarray
-            Grayscale image.
-
-        Returns
-        -------
-        np.ndarray
-            Equalized image.
-        """
-        # TODO: create cv2.createCLAHE with clip_limit and tile_grid_size
-        #       from self.clahe_cfg, then apply
-
-        # because it's grayscale, default tile
-        clahe = cv2.createCLAHE(clipLimit=self.clahe_cfg["clip_limit"], tileGridSize=self.clahe_cfg["tile_grid_size"])
-        result = clahe.apply(image)
-        return result
+        """Convert BGR image to single-channel grayscale safely."""
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            return image  # Already grayscale
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     def _blur(self, image: np.ndarray) -> np.ndarray:
-        """Apply Gaussian blur for noise reduction.
+        """Apply Gaussian blur for noise reduction."""
+        ksize = self.blur_kernel
+        # OpenCV requires Gaussian blur kernels to be odd and positive
+        if ksize % 2 == 0:
+            ksize += 1
+        return cv2.GaussianBlur(image, (ksize, ksize), self.blur_sigma)
 
-        Parameters
-        ----------
-        image : np.ndarray
-            Input image.
+    def _apply_clahe(self, image: np.ndarray) -> np.ndarray:
+        """Apply Contrast-Limited Adaptive Histogram Equalization."""
+        clip = self.clahe_cfg.get("clip_limit", 2.0)
+        grid = tuple(self.clahe_cfg.get("tile_grid_size", [8, 8]))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=grid)
 
-        Returns
-        -------
-        np.ndarray
-            Blurred image.
-        """
-        kernel_size = (self.blur_kernel, self.blur_kernel)
-        blurred = cv2.GaussianBlur(image, kernel_size, self.blur_sigma)
-        # TODO: cv2.GaussianBlur with self.blur_kernel and self.blur_sigma
-        return blurred
+        if image.ndim == 3:
+            # For color images, apply CLAHE only to the Lightness channel in LAB space
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
+        # For grayscale images
+        return clahe.apply(image)

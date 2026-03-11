@@ -1,7 +1,4 @@
-"""Image I/O utilities.
-
-Thin wrappers around cv2 for consistent error handling and path resolution.
-"""
+"""Image I/O utilities."""
 
 from __future__ import annotations
 
@@ -27,36 +24,37 @@ def load_image(path: str | Path) -> np.ndarray:
     Raises
     ------
     FileNotFoundError
-        If the image file does not exist.
+        If the file does not exist.
     ValueError
-        If cv2 fails to decode the image (corrupt or unsupported format).
+        If cv2 fails to decode the image.
     """
-    # TODO:
-    #   1. resolve and validate path exists
-    #   2. cv2.imread
-    #   3. check result is not None
-    raise NotImplementedError
+    path = Path(path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
+
+    image = cv2.imread(str(path))
+    if image is None:
+        raise ValueError(f"Failed to decode image: {path}")
+
+    return image
 
 
 def save_image(image: np.ndarray, path: str | Path) -> Path:
-    """Save an image to disk.
-
-    Creates parent directories if they don't exist.
+    """Save an image to disk, creating parent directories as needed.
 
     Parameters
     ----------
     image : np.ndarray
-        Image to save (BGR or grayscale).
+        Image to save.
     path : str | Path
-        Destination file path (extension determines format).
+        Destination file path.
 
     Returns
     -------
     Path
-        Resolved path where the image was saved.
+        Resolved output path.
     """
-    # TODO:
-    #   1. resolve path, mkdir parents
-    #   2. cv2.imwrite
-    #   3. return resolved path
-    raise NotImplementedError
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), image)
+    return path

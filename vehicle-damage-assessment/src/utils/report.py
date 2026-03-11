@@ -1,73 +1,101 @@
 """Structured report generation for damage assessment results.
 
-Produces a JSON-serializable damage report containing region locations,
-types, confidence scores, and severity estimates.
+Produces a JSON-serializable damage report from DiffEngine output and
+the heuristic DamageAnalyzer results.  No ML model involved — everything
+is derived from pixel differencing and contour geometry.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+import cv2
 import numpy as np
+
+from src.segmentation.damage_analyzer import AnalysisResult, DamageRegion
 
 
 class ReportGenerator:
     """Generates structured JSON reports from pipeline results.
 
     The report is designed to be consumed by downstream insurance
-    systems — it includes machine-readable damage regions, types, and
-    a rough severity estimate based on affected area.
+    systems — it includes machine-readable damage regions, heuristic
+    types, and a weighted severity estimate.
     """
-
-    # severity thresholds as fraction of vehicle bounding-box area
-    SEVERITY_THRESHOLDS = {
-        "minor": 0.02,     # <2% of vehicle area
-        "moderate": 0.08,  # 2–8%
-        "severe": 0.20,    # 8–20%
-        "critical": 1.0,   # >20%
-    }
 
     def generate(
         self,
-        comparison_result,
-        detection_result,
-        segmentation_result=None,
+        analysis: AnalysisResult,
+        vehicle_area_px: int,
+        image_shape: tuple[int, int],
         before_path: str = "",
         after_path: str = "",
+        alignment_reliable: bool = True,
     ) -> dict:
         """Build the full damage report.
 
         Parameters
         ----------
-        comparison_result : DiffResult
-            Output of the comparison stage.
-        detection_result : DetectionResult
-            Output of the vehicle detection stage.
-        segmentation_result : SegmentationResult | None
-            Output of the segmentation stage (if available).
+        analysis : AnalysisResult
+            Output of DamageAnalyzer.analyze().
+        vehicle_area_px : int
+            Total vehicle mask area in pixels.
+        image_shape : tuple[int, int]
+            (height, width) of the processed images.
         before_path : str
-            Path to the before image (for reference in the report).
+            Path to the before image (for reference).
         after_path : str
             Path to the after image.
+        alignment_reliable : bool
+            Whether the aligner flagged the alignment as reliable.
 
         Returns
         -------
         dict
             JSON-serializable damage report.
         """
-        # TODO:
-        #   1. compute vehicle area from detection_result
-        #   2. for each damage region (contour or segmentation instance):
-        #      - bounding box
-        #      - area in pixels
-        #      - area as fraction of vehicle
-        #      - damage type (if segmentation available)
-        #      - confidence (if segmentation available)
-        #   3. compute overall severity
-        #   4. assemble report dict with metadata (timestamp, paths, etc.)
-        raise NotImplementedError
+        region_dicts = []
+        for i, region in enumerate(analysis.regions):
+            region_dicts.append(self._region_to_dict(region, i, vehicle_area_px))
+
+        # sort worst-first
+        region_dicts.sort(key=lambda r: r["severity_score"], reverse=True)
+
+        report = {
+            "metadata": {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "before_image": str(before_path),
+                "after_image": str(after_path),
+                "image_dimensions": {
+                    "height": image_shape[0],
+                    "width": image_shape[1],
+                },
+                "vehicle_area_px": vehicle_area_px,
+                "alignment_reliable": alignment_reliable,
+            },
+            "summary": {
+                "overall_severity": analysis.overall_severity,
+                "overall_severity_score": analysis.overall_severity_score,
+                "total_damage_area_px": analysis.total_damage_area_px,
+                "total_damage_area_pct": round(
+                    analysis.total_damage_area_px / max(vehicle_area_px, 1) * 100, 2
+                ),
+                "num_damage_regions": len(analysis.regions),
+                "damage_type_counts": analysis.damage_type_summary,
+            },
+            "regions": region_dicts,
+        }
+
+        if not alignment_reliable:
+            report["warnings"] = [
+                "Image alignment quality was below threshold. "
+                "Pixel-diff results may include false positives from "
+                "misalignment. Consider re-shooting with similar camera angle."
+            ]
+
+        return report
 
     def save(self, report: dict, path: str | Path) -> Path:
         """Write the report to a JSON file.
@@ -84,52 +112,36 @@ class ReportGenerator:
         Path
             Resolved path where the report was saved.
         """
-        # TODO:
-        #   1. resolve path, mkdir parents
-        #   2. json.dump with indent=2
-        raise NotImplementedError
+        path = Path(path).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _estimate_severity(
-        self, total_damage_area: int, vehicle_area: int
-    ) -> str:
-        """Estimate overall damage severity from area ratio.
+        with open(path, "w") as f:
+            json.dump(report, f, indent=2, default=str)
 
-        Parameters
-        ----------
-        total_damage_area : int
-            Total damaged pixel area.
-        vehicle_area : int
-            Total vehicle pixel area (from detection mask).
+        return path
 
-        Returns
-        -------
-        str
-            One of "minor", "moderate", "severe", "critical".
-        """
-        # TODO: compute ratio, compare against SEVERITY_THRESHOLDS
-        raise NotImplementedError
-
-    def _contour_to_dict(
-        self, contour, index: int, vehicle_area: int
+    def _region_to_dict(
+        self,
+        region: DamageRegion,
+        index: int,
+        vehicle_area_px: int,
     ) -> dict:
-        """Convert a single contour to a report-friendly dict.
+        """Convert a DamageRegion to a report-friendly dict."""
+        x, y, w, h = region.bbox
+        area_pct = region.area_px / max(vehicle_area_px, 1) * 100
 
-        Parameters
-        ----------
-        contour : np.ndarray
-            OpenCV contour.
-        index : int
-            Region index (for labeling).
-        vehicle_area : int
-            Total vehicle area for relative sizing.
-
-        Returns
-        -------
-        dict
-            Region info: bbox, area_px, area_pct, etc.
-        """
-        # TODO:
-        #   1. cv2.boundingRect
-        #   2. cv2.contourArea
-        #   3. compute area_pct = area / vehicle_area
-        raise NotImplementedError
+        return {
+            "region_id": index,
+            "damage_type": region.damage_type.value,
+            "severity_score": region.severity_score,
+            "bounding_box": {"x": x, "y": y, "width": w, "height": h},
+            "area_px": region.area_px,
+            "area_pct_of_vehicle": round(area_pct, 3),
+            "mean_diff_intensity": region.mean_intensity,
+            "geometry": {
+                "perimeter": region.perimeter,
+                "circularity": region.circularity,
+                "aspect_ratio": region.aspect_ratio,
+                "solidity": region.solidity,
+            },
+        }

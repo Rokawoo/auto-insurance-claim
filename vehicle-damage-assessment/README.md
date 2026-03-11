@@ -85,4 +85,4 @@ python scripts/evaluate.py --config configs/eval.yaml
 
 - Hitanshi, Muhammad — Problem definition & research
 - Jeremy — Feasibility analysis
-- Augustus, Loren — Technical approach & implementation plan
+- Roka, Loren — Technical approach & implementation plan

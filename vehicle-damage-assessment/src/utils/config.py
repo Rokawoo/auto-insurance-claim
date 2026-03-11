@@ -1,7 +1,4 @@
-"""Configuration loading and validation.
-
-Reads YAML config files and provides defaults for any missing fields.
-"""
+"""Configuration loading and validation."""
 
 from __future__ import annotations
 
@@ -11,7 +8,7 @@ import yaml
 
 
 def load_config(config_path: str | Path) -> dict:
-    """Load a YAML configuration file.
+    """Load a YAML config file, merged with defaults.
 
     Parameters
     ----------
@@ -21,52 +18,86 @@ def load_config(config_path: str | Path) -> dict:
     Returns
     -------
     dict
-        Parsed configuration dictionary.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the config file does not exist.
-    yaml.YAMLError
-        If the file is not valid YAML.
+        Parsed and merged configuration.
     """
-    # TODO:
-    #   1. resolve path
-    #   2. open and parse with yaml.safe_load
-    #   3. merge with defaults (call _get_defaults)
-    #   4. return merged config
-    raise NotImplementedError
+    path = Path(config_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path) as f:
+        user_config = yaml.safe_load(f) or {}
+
+    return _deep_merge(_get_defaults(), user_config)
 
 
 def _get_defaults() -> dict:
-    """Return default values for all config sections.
-
-    These are used as fallbacks when the user's config file omits a field.
-
-    Returns
-    -------
-    dict
-        Full default config.
-    """
-    # TODO: return a hardcoded dict matching the structure of default.yaml
-    raise NotImplementedError
+    """Default values for all config sections."""
+    return {
+        "preprocessing": {
+            "target_size": [640, 640],
+            "grayscale": True,
+            "blur_kernel": 5,
+            "blur_sigma": 0,
+            "clahe": {
+                "enabled": True,
+                "clip_limit": 2.0,
+                "tile_grid_size": [8, 8],
+            },
+        },
+        "alignment": {
+            "feature_method": "orb",
+            "max_features": 10000,
+            "match_method": "bf",
+            "ratio_threshold": 0.75,
+            "ransac_reproj_threshold": 5.0,
+            "min_match_count": 10,
+            "warp_method": "homography",
+            "max_reprojection_error": 5.0,
+            "min_inlier_ratio": 0.25,
+            "fallback": True,
+            "normalize_exposure": True,
+        },
+        "detection": {
+            "model_name": "yolo11m.pt",
+            "vehicle_classes": [2, 5, 7],
+            "confidence_threshold": 0.5,
+            "iou_threshold": 0.45,
+            "mask_dilation_kernel": 15,
+        },
+        "comparison": {
+            "diff_method": "absolute",
+            "threshold": 30,
+            "morph_kernel": 5,
+            "morph_iterations": 2,
+            "min_contour_area": 500,
+            "max_contour_area": 100000,
+        },
+        "analysis": {
+            "intensity_weight": 0.40,
+            "area_weight": 0.35,
+            "count_weight": 0.25,
+            "scratch_min_aspect": 3.0,
+            "scratch_max_solidity": 0.6,
+            "dent_min_circularity": 0.4,
+            "shatter_min_area_frac": 0.05,
+            "scuff_max_intensity": 40.0,
+            "scuff_max_area": 2000,
+        },
+        "output": {
+            "save_visualizations": True,
+            "save_report": True,
+            "output_dir": "outputs",
+            "visualization_format": "png",
+        },
+    }
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge *override* into *base*.
-
-    Values in *override* take precedence.  Nested dicts are merged
-    recursively rather than replaced wholesale.
-
-    Parameters
-    ----------
-    base : dict
-    override : dict
-
-    Returns
-    -------
-    dict
-        Merged dictionary.
-    """
-    # TODO: recursive dict merge
-    raise NotImplementedError
+    """Recursively merge *override* into *base*."""
+    merged = base.copy()
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged

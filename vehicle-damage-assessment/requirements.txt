@@ -1,13 +1,14 @@
+# -------------------------------------------------------
+# requirements.txt — install AFTER setting up PyTorch
+# see SETUP.md for full instructions
+# -------------------------------------------------------
+
 # core cv / ml
 opencv-python>=4.8.0
-ultralytics>=8.1.0        # YOLOv8
+ultralytics>=8.1.0
 numpy>=1.24.0
 scipy>=1.11.0
 scikit-image>=0.21.0
-
-# deep learning backend (pick one — torch is required by ultralytics)
-torch>=2.0.0
-torchvision>=0.15.0
 
 # data / config
 pyyaml>=6.0

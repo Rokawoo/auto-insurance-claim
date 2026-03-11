@@ -3,14 +3,15 @@
 import numpy as np
 import pytest
 
-from src.preprocessing import Preprocessor
+# Assuming the file above is named preprocessor.py
+from preprocessor import Preprocessor
 
 
 @pytest.fixture
 def default_config():
     """Minimal preprocessing config for testing."""
     return {
-        "target_size": [320, 320],
+        "target_size": [320, 320], # [width, height]
         "grayscale": True,
         "blur_kernel": 5,
         "blur_sigma": 0,
@@ -28,47 +29,58 @@ class TestPreprocessor:
     """Tests for Preprocessor."""
 
     def test_init(self, default_config):
-        """Preprocessor initializes without error."""
-        # TODO: instantiate and assert attributes are set correctly
-        preprocessor = Preprocessor(default_config)
-        assert isinstance(preprocessor, Preprocessor)
+        """Preprocessor initializes without error and assigns attributes."""
+        processor = Preprocessor(default_config)
+        assert processor.target_size == (320, 320)
+        assert processor.grayscale is True
+        assert processor.blur_kernel == 5
 
     def test_process_returns_correct_shape(self, default_config, sample_bgr_image):
         """process() should return an image of target_size."""
-        # TODO: call process, assert output shape matches target_size
-        preprocessor = Preprocessor(default_config)
-        output_image = preprocessor.process(sample_bgr_image)
-        assert tuple(default_config["target_size"]) == output_image.shape
+        processor = Preprocessor(default_config)
+        processed = processor.process(sample_bgr_image)
+        # Note: OpenCV resizes to (width, height), but shape is (height, width)
+        assert processed.shape[:2] == (320, 320)
 
     def test_process_grayscale_single_channel(self, default_config, sample_bgr_image):
         """When grayscale=True, output should be single-channel."""
-        # TODO: assert output.ndim == 2
-        preprocessor = Preprocessor(default_config)
-        output_image = preprocessor._to_grayscale(sample_bgr_image)
-        assert output_image.ndim == 2
+        processor = Preprocessor(default_config)
+        processed = processor.process(sample_bgr_image)
+        assert processed.ndim == 2
 
     def test_process_pair_returns_two_images(self, default_config, sample_bgr_image):
         """process_pair should return a tuple of two processed images."""
-        # TODO: call process_pair with two images, check tuple length
-        preprocessor = Preprocessor(default_config)
-        output_image = preprocessor.process_pair(sample_bgr_image, sample_bgr_image)
-        assert len(output_image) == 2
+        processor = Preprocessor(default_config)
+        before, after = processor.process_pair(sample_bgr_image, sample_bgr_image)
+        assert before.shape == (320, 320)
+        assert after.shape == (320, 320)
 
     def test_process_no_grayscale(self, default_config, sample_bgr_image):
-        """When grayscale=False, output should remain 3-channel."""
-        # TODO: modify config, assert output.ndim == 3
-        copy = default_config
-        copy["grayscale"] = False
-        preprocessor = Preprocessor(copy)
-        output_image = preprocessor.process(sample_bgr_image)
-        assert output_image.ndim == 3
-        
-    def test_blur_reduces_noise(self, default_config, sample_bgr_image):
+        """When grayscale=False, output should remain 3-channel (and CLAHE should still work)."""
+        default_config["grayscale"] = False
+        processor = Preprocessor(default_config)
+        processed = processor.process(sample_bgr_image)
+        assert processed.ndim == 3
+        assert processed.shape == (320, 320, 3)
+
+    def test_blur_reduces_noise(self, default_config):
         """Blurring a noisy image should reduce pixel variance."""
-        # TODO: create noisy image, process, compare variance before/after
-        original = sample_bgr_image
-        preprocessor = Preprocessor(default_config)
-        output_image = preprocessor._blur(sample_bgr_image)
-        original_variance = np.var(original)
-        new_variance = np.var(output_image)
-        assert original_variance > new_variance
+        # Create a flat gray image with high noise
+        base_gray = np.full((480, 640, 3), 128, dtype=np.uint8)
+        noise = np.random.normal(0, 25, (480, 640, 3)).astype(np.uint8)
+        noisy_image = cv2.add(base_gray, noise)
+
+        # Process without blur
+        config_no_blur = default_config.copy()
+        config_no_blur["blur_kernel"] = 0
+        processor_no_blur = Preprocessor(config_no_blur)
+        out_no_blur = processor_no_blur.process(noisy_image)
+
+        # Process with blur
+        config_blur = default_config.copy()
+        config_blur["blur_kernel"] = 9 # high blur
+        processor_blur = Preprocessor(config_blur)
+        out_blur = processor_blur.process(noisy_image)
+
+        # The variance (spread of pixel values) should be lower in the blurred image
+        assert np.var(out_blur) < np.var(out_no_blur)

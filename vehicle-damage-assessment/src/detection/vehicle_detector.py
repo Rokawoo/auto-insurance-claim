@@ -68,10 +68,9 @@ class VehicleDetector:
         Separated from __init__ so that the pipeline can control when the
         (potentially large) model is loaded into memory.
         """
-        # TODO:
-        #   from ultralytics import YOLO
-        #   self.model = YOLO(self.model_name)
-        raise NotImplementedError
+        from ultralytics import YOLO
+
+        self.model = YOLO(self.model_name)
 
     def detect(self, image: np.ndarray) -> DetectionResult:
         """Run vehicle detection on a single image.
@@ -86,14 +85,27 @@ class VehicleDetector:
         DetectionResult
             Boxes, confidences, class IDs, and the binary vehicle mask.
         """
-        # TODO:
-        #   1. ensure model is loaded
-        #   2. run inference with conf and iou thresholds
-        #   3. filter to vehicle_classes only
-        #   4. build binary mask from bounding boxes
-        #   5. dilate mask to include edges/bumpers
-        #   6. return DetectionResult
-        raise NotImplementedError
+        if self.model is None:
+            self.load_model()
+
+        results = self.model.predict(
+            image,
+            conf=self.conf_threshold,
+            iou=self.iou_threshold,
+            verbose=False,
+        )
+
+        boxes, confidences, class_ids = self._filter_vehicle_detections(results)
+
+        h, w = image.shape[:2]
+        vehicle_mask = self._boxes_to_mask(boxes, (h, w))
+
+        return DetectionResult(
+            boxes=boxes,
+            confidences=confidences,
+            class_ids=class_ids,
+            vehicle_mask=vehicle_mask,
+        )
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -112,8 +124,24 @@ class VehicleDetector:
         tuple[np.ndarray, np.ndarray, np.ndarray]
             (filtered_boxes_xyxy, filtered_confidences, filtered_class_ids)
         """
-        # TODO: iterate results[0].boxes, keep entries whose cls is in self.vehicle_classes
-        raise NotImplementedError
+        boxes_obj = results[0].boxes
+        if boxes_obj is None or len(boxes_obj) == 0:
+            return (
+                np.empty((0, 4), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+            )
+
+        all_boxes = boxes_obj.xyxy.cpu().numpy()
+        all_confs = boxes_obj.conf.cpu().numpy()
+        all_cls = boxes_obj.cls.cpu().numpy().astype(int)
+
+        mask = np.isin(all_cls, self.vehicle_classes)
+        return (
+            all_boxes[mask].astype(np.float32),
+            all_confs[mask].astype(np.float32),
+            all_cls[mask].astype(np.int32),
+        )
 
     def _boxes_to_mask(
         self, boxes: np.ndarray, image_shape: tuple[int, int]
@@ -132,8 +160,14 @@ class VehicleDetector:
         np.ndarray
             Binary mask, dtype uint8, values {0, 255}.
         """
-        # TODO:
-        #   1. create zero mask of image_shape
-        #   2. for each box, draw filled rectangle
-        #   3. dilate with self.mask_dilation_kernel
-        raise NotImplementedError
+        mask = np.zeros(image_shape, dtype=np.uint8)
+
+        for box in boxes:
+            x1, y1, x2, y2 = box.astype(int)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
+
+        k = self.mask_dilation_kernel
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        mask = cv2.dilate(mask, kernel, iterations=1)
+
+        return mask

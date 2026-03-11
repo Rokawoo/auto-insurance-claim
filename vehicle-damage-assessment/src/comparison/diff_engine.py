@@ -68,32 +68,35 @@ class DiffEngine:
         after: np.ndarray,
         vehicle_mask: np.ndarray | None = None,
     ) -> DiffResult:
-        """Compute the difference between aligned before/after images.
+        """Compute the difference between aligned before/after images."""
+        if before.shape != after.shape:
+            raise ValueError("before and after images must have the same shape")
 
-        Parameters
-        ----------
-        before : np.ndarray
-            Preprocessed + aligned "before" image (grayscale).
-        after : np.ndarray
-            Preprocessed + aligned "after" image (grayscale, warped).
-        vehicle_mask : np.ndarray | None
-            Binary mask from VehicleDetector.  If provided, diff is
-            computed only within the masked region.
+        if self.diff_method == "absolute":
+            raw_diff = self._absolute_diff(before, after)
+        elif self.diff_method == "structural_similarity":
+            raw_diff = self._ssim_diff(before, after)
+        else:
+            raise ValueError(f"Unsupported diff_method: {self.diff_method}")
 
-        Returns
-        -------
-        DiffResult
-            Raw diff, thresholded mask, cleaned contours, bounding boxes.
-        """
-        # TODO:
-        #   1. compute raw diff (absolute or SSIM-based)
-        #   2. if vehicle_mask provided, bitwise_and to zero out non-vehicle
-        #   3. threshold the diff
-        #   4. morphological cleanup (open then close)
-        #   5. find contours, filter by area
-        #   6. compute bounding rects
-        #   7. return DiffResult
-        raise NotImplementedError
+        if vehicle_mask is not None:
+            if vehicle_mask.shape != raw_diff.shape:
+                raise ValueError("vehicle_mask must have the same shape as the input images")
+            raw_diff = cv2.bitwise_and(raw_diff, vehicle_mask)
+
+        thresh_diff = self._threshold(raw_diff)
+        cleaned_mask = self._morphological_cleanup(thresh_diff)
+        contours, bounding_boxes = self._extract_contours(cleaned_mask)
+        damage_area_px = int(np.count_nonzero(cleaned_mask))
+
+        return DiffResult(
+            raw_diff=raw_diff,
+            thresh_diff=thresh_diff,
+            cleaned_mask=cleaned_mask,
+            contours=contours,
+            bounding_boxes=bounding_boxes,
+            damage_area_px=damage_area_px,
+        )
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -102,99 +105,59 @@ class DiffEngine:
     def _absolute_diff(
         self, before: np.ndarray, after: np.ndarray
     ) -> np.ndarray:
-        """Simple per-pixel absolute difference.
-
-        Parameters
-        ----------
-        before, after : np.ndarray
-            Same-size grayscale images.
-
-        Returns
-        -------
-        np.ndarray
-            Absolute difference image (uint8).
-        """
-        # TODO: cv2.absdiff
-        raise NotImplementedError
+        """Simple per-pixel absolute difference."""
+        return cv2.absdiff(before, after)
 
     def _ssim_diff(
         self, before: np.ndarray, after: np.ndarray
     ) -> np.ndarray:
-        """Structural Similarity Index–based difference.
+        """Structural Similarity Index–based difference."""
+        from skimage.metrics import structural_similarity as ssim
 
-        Uses skimage.metrics.structural_similarity to get a per-pixel
-        SSIM map, then inverts it so that *low* similarity = *high* diff.
-
-        Parameters
-        ----------
-        before, after : np.ndarray
-            Same-size grayscale images.
-
-        Returns
-        -------
-        np.ndarray
-            Inverted SSIM difference map, scaled to uint8.
-        """
-        # TODO:
-        #   from skimage.metrics import structural_similarity as ssim
-        #   score, diff_map = ssim(before, after, full=True)
-        #   convert diff_map to uint8 (invert so damage = bright)
-        raise NotImplementedError
+        _, diff_map = ssim(before, after, full=True)
+        diff_map = (1.0 - diff_map) * 255.0
+        diff_map = np.clip(diff_map, 0, 255).astype(np.uint8)
+        return diff_map
 
     def _threshold(self, diff: np.ndarray) -> np.ndarray:
-        """Apply binary threshold to the diff image.
-
-        Parameters
-        ----------
-        diff : np.ndarray
-            Grayscale difference image.
-
-        Returns
-        -------
-        np.ndarray
-            Binary mask (0 or 255).
-        """
-        # TODO: cv2.threshold with THRESH_BINARY
-        raise NotImplementedError
+        """Apply binary threshold to the diff image."""
+        _, binary = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
+        return binary
 
     def _morphological_cleanup(self, mask: np.ndarray) -> np.ndarray:
-        """Remove noise and fill small holes in the binary mask.
+        """Remove noise and fill small holes in the binary mask."""
+        kernel = np.ones((self.morph_kernel, self.morph_kernel), dtype=np.uint8)
+        opened = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            kernel,
+            iterations=self.morph_iterations,
+        )
+        closed = cv2.morphologyEx(
+            opened,
+            cv2.MORPH_CLOSE,
+            kernel,
+            iterations=self.morph_iterations,
+        )
+        return closed
 
-        Applies morphological opening (remove small specks) followed by
-        closing (fill small gaps).
 
-        Parameters
-        ----------
-        mask : np.ndarray
-            Binary mask.
 
-        Returns
-        -------
-        np.ndarray
-            Cleaned binary mask.
-        """
-        # TODO: create kernel, morphologyEx MORPH_OPEN then MORPH_CLOSE
-        raise NotImplementedError
 
     def _extract_contours(
         self, mask: np.ndarray
     ) -> tuple[list, list[tuple[int, int, int, int]]]:
-        """Find contours and their bounding rectangles.
+        """Find contours and their bounding rectangles."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        Filters by ``min_contour_area`` and ``max_contour_area``.
+        filtered_contours = []
+        bounding_boxes = []
 
-        Parameters
-        ----------
-        mask : np.ndarray
-            Cleaned binary mask.
+        for contour in contours:
+            area = cv2.contourArea(contour)
 
-        Returns
-        -------
-        tuple[list, list[tuple]]
-            (filtered_contours, bounding_boxes)
-        """
-        # TODO:
-        #   1. cv2.findContours
-        #   2. filter by area
-        #   3. cv2.boundingRect for each surviving contour
-        raise NotImplementedError
+            if self.min_contour_area <= area <= self.max_contour_area:
+                filtered_contours.append(contour)
+                bounding_boxes.append(cv2.boundingRect(contour))
+
+        return filtered_contours, bounding_boxes

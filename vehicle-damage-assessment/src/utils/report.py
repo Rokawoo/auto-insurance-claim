@@ -139,9 +139,8 @@ class ReportGenerator:
             "area_pct_of_vehicle": round(area_pct, 3),
             "mean_diff_intensity": region.mean_intensity,
             "geometry": {
-                "perimeter": region.perimeter,
-                "circularity": region.circularity,
-                "aspect_ratio": region.aspect_ratio,
-                "solidity": region.solidity,
+                "circularity": getattr(region, "circularity", 0.0),
+                "aspect_ratio": getattr(region, "aspect_ratio", 0.0),
+                "solidity": getattr(region, "solidity", 0.0),
             },
         }

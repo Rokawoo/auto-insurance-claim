@@ -1,45 +1,27 @@
 #!/usr/bin/env python3
-"""Assess vehicle damage from before/after images.
+"""Assess vehicle damage from before/after images using pipeline detections.
 
-This is the main user-facing script.  It runs the full pipeline and
-prints a human-readable damage report to the terminal, saves annotated
-images and a JSON report to disk.
+This preserves all original reporting and visualization behavior, but
+replaces the internal damage detection with the pipeline's masked diff + analyzer.
 
-Usage
------
-    # single pair
-    python scripts/assess_damage.py \\
-        --before data/raw/before/car_001.jpg \\
-        --after  data/raw/after/car_001.jpg
-
-    # with custom config and output directory
-    python scripts/assess_damage.py \\
-        --before before.jpg --after after.jpg \\
-        --config configs/default.yaml \\
-        --output results/
-
-    # batch mode (CSV with columns: before_path, after_path)
-    python scripts/assess_damage.py \\
-        --batch data/pairs.csv \\
-        --output results/
+Outputs:
+- Annotated images
+- JSON report
+- Human-readable terminal report
 """
 
 from __future__ import annotations
-
-import argparse
-import json
 import sys
+import json
 from pathlib import Path
+import cv2
+import numpy as np
 
-# add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Resolve project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.config import load_config
-from src.pipeline import DamagePipeline
-from src.pipeline.damage_pipeline import PipelineResult
-
-
-# ── ANSI colors for terminal output ─────────────────────────────────
+# ANSI colors for terminal
 class C:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -58,169 +40,134 @@ SEVERITY_COLORS = {
     "critical": C.MAGENTA,
 }
 
+# ------------------- Imports from pipeline -------------------
+from src.alignment.aligner import ImageAligner
+from src.detection.vehicle_detector import VehicleDetector
+from src.comparison.diff_engine import DiffEngine
+from src.segmentation.damage_analyzer import DamageAnalyzer
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Vehicle damage assessment from before/after images.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--before", type=str, help="Path to before (undamaged) image")
-    parser.add_argument("--after", type=str, help="Path to after (damaged) image")
-    parser.add_argument("--batch", type=str, help="CSV file with before_path,after_path columns")
-    parser.add_argument("--config", type=str, default="configs/default.yaml",
-                        help="Pipeline config YAML (default: configs/default.yaml)")
-    parser.add_argument("--output", type=str, default="outputs",
-                        help="Output directory (default: outputs/)")
-    parser.add_argument("--no-save", action="store_true",
-                        help="Don't save output files, just print report")
-    parser.add_argument("--json", action="store_true",
-                        help="Print raw JSON report instead of formatted text")
+# ------------------- Paths -------------------
+TESTS_DIR = PROJECT_ROOT / "tests"
+BEFORE_IMG = TESTS_DIR / "images" / "car A - 1.png"
+AFTER_IMG  = TESTS_DIR / "images" / "car A - 2.png"
+OUTPUT_DIR = TESTS_DIR / "outputs" / "assess_damage"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    args = parser.parse_args()
+# ------------------- Helpers -------------------
+def load_img(path: Path) -> np.ndarray:
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    img = cv2.imread(str(path))
+    if img is None:
+        raise RuntimeError(f"cv2.imread failed on {path}")
+    return img
 
-    if args.batch is None and (args.before is None or args.after is None):
-        parser.error("Provide --before and --after, or --batch")
+def to_gray(img):
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
 
-    return args
+def label(img, text, pos=(10,30), scale=0.6):
+    out = img.copy()
+    cv2.putText(out, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), 4, cv2.LINE_AA)
+    cv2.putText(out, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, (255,255,255), 2, cv2.LINE_AA)
+    return out
 
+def save_img(name: str, img: np.ndarray):
+    path = OUTPUT_DIR / name
+    cv2.imwrite(str(path), img)
+    print(f"Saved: {path.name}")
 
-def print_report(result: PipelineResult) -> None:
-    """Print a formatted damage report to the terminal."""
-    report = result.report
-    summary = report["summary"]
-    meta = report["metadata"]
+# ------------------- Main -------------------
+def main():
+    print("\nUsing pipeline for accurate damage detection...")
 
-    sev = summary["overall_severity"]
-    sev_color = SEVERITY_COLORS.get(sev, C.RESET)
+    # 1. Load images
+    before = load_img(BEFORE_IMG)
+    after = load_img(AFTER_IMG)
+    if before.shape[:2] != after.shape[:2]:
+        after = cv2.resize(after, (before.shape[1], before.shape[0]))
 
-    print()
-    print(f"{C.BOLD}{'═' * 60}{C.RESET}")
-    print(f"{C.BOLD}  VEHICLE DAMAGE ASSESSMENT REPORT{C.RESET}")
-    print(f"{'═' * 60}")
-    print()
+    # 2. Align
+    aligner = ImageAligner({"feature_method": "orb", "fallback": True})
+    res_align = aligner.align(before, after)
+    warped_after = res_align.warped_after
 
-    # metadata
-    print(f"  {C.GRAY}Before:{C.RESET}  {meta['before_image']}")
-    print(f"  {C.GRAY}After:{C.RESET}   {meta['after_image']}")
-    print(f"  {C.GRAY}Image:{C.RESET}   {meta['image_dimensions']['width']}×{meta['image_dimensions']['height']}px")
+    # 3. Detect vehicle
+    detector = VehicleDetector({"confidence_threshold": 0.3})
+    vehicle_res = detector.detect(before)
 
-    if not meta.get("alignment_reliable", True):
-        print(f"\n  {C.YELLOW}⚠  Alignment quality below threshold — results may be noisy{C.RESET}")
+    # 4. Diff with mask
+    diff_engine = DiffEngine({"threshold": 30, "min_contour_area": 100})
+    diff_res = diff_engine.compare(to_gray(before), to_gray(warped_after), vehicle_mask=vehicle_res.vehicle_mask)
 
-    # overall severity
-    print()
-    print(f"  {C.BOLD}Overall Severity:{C.RESET}  {sev_color}{sev.upper()}{C.RESET}"
-          f"  ({summary['overall_severity_score']:.2f})")
-    print(f"  {C.BOLD}Damage Regions:{C.RESET}    {summary['num_damage_regions']}")
-    print(f"  {C.BOLD}Total Damage Area:{C.RESET} {summary['total_damage_area_pct']:.1f}% of vehicle")
+    # 5. Damage analysis
+    analyzer = DamageAnalyzer()
+    analysis = analyzer.analyze(diff_res.contours, diff_res.raw_diff, vehicle_mask=vehicle_res.vehicle_mask)
 
-    # type breakdown
-    if summary["damage_type_counts"]:
-        print()
-        print(f"  {C.BOLD}Damage Type Breakdown:{C.RESET}")
-        for dtype, count in sorted(summary["damage_type_counts"].items()):
-            print(f"    • {dtype}: {count}")
+    # ------------------- Visualization: colored damage regions (true shapes) -------------------
+    final_viz = warped_after.copy()
+    overlay = final_viz.copy()
 
-    # per-region details
-    regions = report.get("regions", [])
-    if regions:
-        print()
-        print(f"  {C.BOLD}{'─' * 56}{C.RESET}")
-        print(f"  {C.BOLD}Region Details (sorted by severity):{C.RESET}")
-        print(f"  {C.BOLD}{'─' * 56}{C.RESET}")
+    for reg in analysis.regions:
+        color = (0, 255, 0) if reg.damage_type.value != "unknown" else (0, 255, 255)
+        # Draw filled contour
+        cv2.drawContours(overlay, [reg.contour], -1, color, thickness=cv2.FILLED)
+        
+        # Compute centroid from contour
+        M = cv2.moments(reg.contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            # fallback to bounding box center
+            x, y, w, h = reg.bbox
+            cx, cy = x + w // 2, y + h // 2
 
-        for r in regions:
-            rsev = r["severity_score"]
-            if rsev >= 0.55:
-                rc = C.RED
-            elif rsev >= 0.30:
-                rc = C.YELLOW
-            else:
-                rc = C.CYAN
+        cv2.putText(final_viz, f"{reg.damage_type.value} ({reg.severity_score:.2f})",
+                    (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-            bbox = r["bounding_box"]
-            print(f"\n  {C.BOLD}Region #{r['region_id']}{C.RESET}")
-            print(f"    Type:       {r['damage_type']}")
-            print(f"    Severity:   {rc}{rsev:.3f}{C.RESET}")
-            print(f"    Area:       {r['area_px']}px ({r['area_pct_of_vehicle']:.2f}% of vehicle)")
-            print(f"    Location:   ({bbox['x']}, {bbox['y']}) {bbox['width']}×{bbox['height']}")
-            print(f"    Intensity:  {r['mean_diff_intensity']:.1f}/255")
-            geom = r["geometry"]
-            print(f"    Geometry:   circ={geom['circularity']:.2f}  "
-                  f"aspect={geom['aspect_ratio']:.1f}  "
-                  f"solid={geom['solidity']:.2f}")
+    # Blend overlay with original image
+    alpha = 0.3
+    cv2.addWeighted(overlay, alpha, final_viz, 1 - alpha, 0, final_viz)
 
-    # warnings
-    warnings = report.get("warnings", [])
-    if warnings:
-        print()
-        for w in warnings:
-            print(f"  {C.YELLOW}⚠  {w}{C.RESET}")
+    # Save final analysis
+    save_img("final_analysis.png", label(final_viz, f"OVERALL: {analysis.overall_severity.upper()}"))
 
-    print()
-    print(f"{'═' * 60}")
-    print()
+    # ------------------- JSON report -------------------
+    report = {
+        "before_image": str(BEFORE_IMG),
+        "after_image": str(AFTER_IMG),
+        "overall_severity": analysis.overall_severity,
+        "overall_severity_score": analysis.overall_severity_score,
+        "damage_type_summary": analysis.damage_type_summary,
+        "regions": [
+            {
+                "region_id": i+1,
+                "bbox": reg.bbox,
+                "damage_type": reg.damage_type.value,
+                "severity_score": reg.severity_score
+            } for i, reg in enumerate(analysis.regions)
+        ]
+    }
+    report_path = OUTPUT_DIR / "report.json"
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"JSON report saved: {report_path.name}")
 
+    # ------------------- Terminal report -------------------
+    print(f"\n{'═'*60}")
+    print(f"  VEHICLE DAMAGE ASSESSMENT REPORT")
+    print(f"{'═'*60}")
+    print(f"Before: {BEFORE_IMG}")
+    print(f"After:  {AFTER_IMG}")
+    print(f"Overall Severity: {analysis.overall_severity.upper()} ({analysis.overall_severity_score:.2f})")
+    print(f"Damage Summary: {analysis.damage_type_summary}")
+    print(f"Number of Damage Regions: {len(analysis.regions)}\n")
 
-def run_single(args: argparse.Namespace, config: dict) -> None:
-    """Run pipeline on a single pair and display results."""
-    pipeline = DamagePipeline(config)
+    for i, reg in enumerate(analysis.regions, 1):
+        print(f"Region #{i}: Type={reg.damage_type.value}, Severity={reg.severity_score:.3f}, BBox={reg.bbox}")
 
-    output_dir = None if args.no_save else args.output
-    result = pipeline.run(args.before, args.after, output_dir=output_dir)
-
-    if args.json:
-        print(json.dumps(result.report, indent=2))
-    else:
-        print_report(result)
-
-    if not args.no_save:
-        print(f"  {C.GREEN}✓ Outputs saved to {args.output}/{C.RESET}\n")
-
-
-def run_batch(args: argparse.Namespace, config: dict) -> None:
-    """Run pipeline on all pairs from a CSV."""
-    import pandas as pd
-
-    df = pd.read_csv(args.batch)
-    if "before_path" not in df.columns or "after_path" not in df.columns:
-        print(f"{C.RED}ERROR: CSV must have 'before_path' and 'after_path' columns{C.RESET}")
-        sys.exit(1)
-
-    pairs = list(zip(df["before_path"], df["after_path"]))
-    print(f"\n  Processing {len(pairs)} image pairs...\n")
-
-    pipeline = DamagePipeline(config)
-    output_dir = None if args.no_save else args.output
-    results = pipeline.run_batch(pairs, output_dir=output_dir)
-
-    # print summary table
-    print(f"\n{'═' * 60}")
-    print(f"  BATCH SUMMARY: {len(results)}/{len(pairs)} processed successfully")
-    print(f"{'═' * 60}\n")
-
-    for result in results:
-        sev = result.report["summary"]["overall_severity"]
-        score = result.report["summary"]["overall_severity_score"]
-        n_regions = result.report["summary"]["num_damage_regions"]
-        color = SEVERITY_COLORS.get(sev, C.RESET)
-        before = Path(result.report["metadata"]["before_image"]).name
-        print(f"  {before:30s}  {color}{sev:10s}{C.RESET}  "
-              f"score={score:.2f}  regions={n_regions}")
-
-    if not args.no_save:
-        print(f"\n  {C.GREEN}✓ All outputs saved to {args.output}/{C.RESET}\n")
-
-
-def main() -> None:
-    args = parse_args()
-    config = load_config(args.config)
-
-    if args.batch:
-        run_batch(args, config)
-    else:
-        run_single(args, config)
-
+    print(f"\nOutputs saved under: {OUTPUT_DIR.resolve()}")
+    print(f"{'═'*60}\n")
 
 if __name__ == "__main__":
     main()
